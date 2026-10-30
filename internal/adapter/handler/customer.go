@@ -53,6 +53,36 @@ type billingAddress struct {
 	Country    string `json:"country"`
 }
 
+// toDomain converts the request address; nil stays nil.
+func (a *billingAddress) toDomain() *domain.BillingAddress {
+	if a == nil {
+		return nil
+	}
+	return &domain.BillingAddress{
+		Line1:   a.Line1,
+		Line2:   a.Line2,
+		City:    a.City,
+		State:   a.State,
+		Zip:     coalesce(a.Zip, a.PostalCode),
+		Country: a.Country,
+	}
+}
+
+// respondCustomerError maps the caller-fixable customer errors to 400 / 409.
+// It returns false for anything else so the caller can fall back to a 500.
+func respondCustomerError(c *gin.Context, err error) bool {
+	var fieldErr *domain.CustomerFieldError
+	switch {
+	case errors.Is(err, domain.ErrCustomerExternalIDTaken):
+		respondError(c, http.StatusConflict, codeConflict, err.Error())
+	case errors.As(err, &fieldErr):
+		respondError(c, http.StatusBadRequest, codeValidationFailed, err.Error())
+	default:
+		return false
+	}
+	return true
+}
+
 // coalesce returns the first non-empty argument.
 func coalesce(vals ...string) string {
 	for _, v := range vals {
@@ -77,6 +107,20 @@ type createCustomerRequest struct {
 	Zip            string          `json:"zip"`
 	Country        string          `json:"country" binding:"omitempty,len=2"` // Allow empty or iso code
 	BillingAddress *billingAddress `json:"billing_address"`                   // nested alias for the flat fields
+	Line2          string          `json:"line2"`
+
+	// Caller-owned profile fields.
+	ExternalID      string                 `json:"external_id"`
+	LegalName       string                 `json:"legal_name"`
+	Locale          string                 `json:"locale"`
+	PaymentTerms    string                 `json:"payment_terms"`
+	Website         string                 `json:"website"`
+	Notes           string                 `json:"notes"`
+	Tags            []string               `json:"tags"`
+	BillingEmails   []string               `json:"billing_emails"`
+	ShippingAddress *billingAddress        `json:"shipping_address"`
+	Metadata        map[string]interface{} `json:"metadata"`
+
 	// US sales-tax exemption (D2)
 	TaxExempt             bool   `json:"tax_exempt"`
 	TaxExemptionNumber    string `json:"tax_exemption_number"`
@@ -110,6 +154,7 @@ func (h *CustomerHandler) CreateCustomer(c *gin.Context) {
 		req.State = coalesce(req.State, a.State)
 		req.Zip = coalesce(req.Zip, a.Zip, a.PostalCode)
 		req.Country = coalesce(req.Country, a.Country)
+		req.Line2 = coalesce(req.Line2, a.Line2)
 	}
 
 	input := service.CreateCustomerInput{
@@ -126,16 +171,31 @@ func (h *CustomerHandler) CreateCustomer(c *gin.Context) {
 		State:         req.State,
 		Zip:           req.Zip,
 		Country:       req.Country,
+		Line2:         req.Line2,
 
 		TaxExempt:             req.TaxExempt,
 		TaxExemptionNumber:    req.TaxExemptionNumber,
 		TaxExemptionCode:      req.TaxExemptionCode,
 		TaxExemptionExpiresAt: expiry,
+
+		ExternalID:      req.ExternalID,
+		LegalName:       req.LegalName,
+		Locale:          req.Locale,
+		PaymentTerms:    req.PaymentTerms,
+		Website:         req.Website,
+		Notes:           req.Notes,
+		Tags:            req.Tags,
+		BillingEmails:   req.BillingEmails,
+		ShippingAddress: req.ShippingAddress.toDomain(),
+		Metadata:        req.Metadata,
 	}
 
 	ctx := context.WithValue(c.Request.Context(), domain.TenantIDKey, tenantID)
 	customer, err := h.service.CreateCustomer(ctx, input)
 	if err != nil {
+		if respondCustomerError(c, err) {
+			return
+		}
 		respondInternalError(c, err)
 		return
 	}
@@ -234,7 +294,22 @@ type updateCustomerRequest struct {
 	Zip            *string         `json:"zip"`
 	Country        *string         `json:"country" binding:"omitempty,len=2"`
 	BillingAddress *billingAddress `json:"billing_address"` // nested alias for the flat fields
+	Line2          *string         `json:"line2"`
 	Active         *bool           `json:"active"`
+
+	// Caller-owned profile fields: absent = unchanged. external_id "" clears it;
+	// tags / billing_emails [] clear the list; metadata is merged and a null
+	// value removes that key; an empty shipping_address object clears it.
+	ExternalID      *string                `json:"external_id"`
+	LegalName       *string                `json:"legal_name"`
+	Locale          *string                `json:"locale"`
+	PaymentTerms    *string                `json:"payment_terms"`
+	Website         *string                `json:"website"`
+	Notes           *string                `json:"notes"`
+	Tags            []string               `json:"tags"`
+	BillingEmails   []string               `json:"billing_emails"`
+	ShippingAddress *billingAddress        `json:"shipping_address"`
+	Metadata        map[string]interface{} `json:"metadata"`
 	// US sales-tax exemption (D2)
 	TaxExempt             *bool   `json:"tax_exempt"`
 	TaxExemptionNumber    *string `json:"tax_exemption_number"`
@@ -314,6 +389,9 @@ func (h *CustomerHandler) UpdateCustomer(c *gin.Context) {
 		if req.Country == nil && a.Country != "" {
 			req.Country = &a.Country
 		}
+		if req.Line2 == nil && a.Line2 != "" {
+			req.Line2 = &a.Line2
+		}
 	}
 
 	// Partial: only touch the exemption expiry when the field is present.
@@ -345,7 +423,19 @@ func (h *CustomerHandler) UpdateCustomer(c *gin.Context) {
 		State:         req.State,
 		Zip:           req.Zip,
 		Country:       req.Country,
+		Line2:         req.Line2,
 		Active:        req.Active,
+
+		ExternalID:      req.ExternalID,
+		LegalName:       req.LegalName,
+		Locale:          req.Locale,
+		PaymentTerms:    req.PaymentTerms,
+		Website:         req.Website,
+		Notes:           req.Notes,
+		Tags:            req.Tags,
+		BillingEmails:   req.BillingEmails,
+		ShippingAddress: req.ShippingAddress.toDomain(),
+		Metadata:        req.Metadata,
 
 		TaxExempt:                req.TaxExempt,
 		TaxExemptionNumber:       req.TaxExemptionNumber,
@@ -354,6 +444,10 @@ func (h *CustomerHandler) UpdateCustomer(c *gin.Context) {
 		TaxExemptionExpiresAtSet: expirySet,
 	})
 	if err != nil {
+		if errors.Is(err, domain.ErrCustomerExternalIDTaken) {
+			respondError(c, http.StatusConflict, codeConflict, err.Error())
+			return
+		}
 		// The archive gate ("active subscriptions") and field validation are
 		// caller-fixable, so they surface as 400s.
 		respondError(c, http.StatusBadRequest, codeValidationFailed, err.Error())
@@ -384,11 +478,13 @@ func (h *CustomerHandler) ListCustomers(c *gin.Context) {
 	limit, offset := parsePageLimit(c)
 
 	filter := domain.CustomerFilter{
-		Search:  search,
-		Country: country,
-		Status:  status,
-		Limit:   limit,
-		Offset:  offset,
+		Search:     search,
+		Country:    country,
+		Status:     status,
+		ExternalID: c.Query("external_id"),
+		Tag:        c.Query("tag"),
+		Limit:      limit,
+		Offset:     offset,
 	}
 
 	customers, err := h.service.ListCustomers(ctx, tenantID, filter)

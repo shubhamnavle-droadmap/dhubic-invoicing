@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Customer profile fields and `metadata`.** Customers gain `external_id`
+  (your own id, unique per workspace — a duplicate returns 409), `legal_name`,
+  `locale`, `payment_terms`, `website`, `notes`, `tags`, `billing_emails`,
+  `shipping_address`, a second address line (`billing_address.line2`) and a
+  free-form `metadata` object. `metadata` holds flat string / number / boolean
+  values: up to 50 keys, 40-character key names, 500-character string values,
+  8 KB in total. On update it is merged into the stored object and a `null`
+  value removes that key. `GET /v1/customers` accepts `?external_id=` and
+  `?tag=`. All fields are optional, so existing calls are unchanged.
+  `payment_terms` is stored only and does not change invoice due dates.
+  Migration `000178`.
 - **Manual invoices (`POST /v1/invoices/manual`).** Create a one-off invoice
   from explicit line items for a chosen issuing legal entity and dates —
   built for loading already-priced receivables from a billing-run export.

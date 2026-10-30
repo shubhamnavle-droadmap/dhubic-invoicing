@@ -83,11 +83,24 @@ type CreateCustomerInput struct {
 	State         string
 	Zip           string
 	Country       string
+	Line2         string
 
 	TaxExempt             bool
 	TaxExemptionNumber    string
 	TaxExemptionCode      string
 	TaxExemptionExpiresAt *time.Time
+
+	// Caller-owned profile fields (all optional).
+	ExternalID      string
+	LegalName       string
+	Locale          string
+	PaymentTerms    string
+	Website         string
+	Notes           string
+	Tags            []string
+	BillingEmails   []string
+	ShippingAddress *domain.BillingAddress
+	Metadata        map[string]any
 }
 
 func (s *CustomerService) CreateCustomer(ctx context.Context, input CreateCustomerInput) (*domain.Customer, error) {
@@ -120,6 +133,7 @@ func (s *CustomerService) CreateCustomer(ctx context.Context, input CreateCustom
 		PlaceOfSupply: &input.PlaceOfSupply, // P24
 		BillingAddress: domain.BillingAddress{
 			Line1:   input.Line1,
+			Line2:   input.Line2,
 			City:    input.City,
 			State:   input.State,
 			Zip:     input.Zip,
@@ -132,7 +146,27 @@ func (s *CustomerService) CreateCustomer(ctx context.Context, input CreateCustom
 		TaxExemptionExpiresAt: input.TaxExemptionExpiresAt,
 		Active:                true,
 		CreatedAt:             time.Now().UTC(),
+
+		LegalName:       input.LegalName,
+		Locale:          input.Locale,
+		PaymentTerms:    input.PaymentTerms,
+		Website:         input.Website,
+		Notes:           input.Notes,
+		Tags:            input.Tags,
+		BillingEmails:   input.BillingEmails,
+		ShippingAddress: input.ShippingAddress,
 	}
+	if input.ExternalID != "" {
+		customer.ExternalID = &input.ExternalID
+	}
+	if err := customer.NormalizeProfile(); err != nil {
+		return nil, err
+	}
+	meta, err := domain.MergeMetadata(nil, input.Metadata)
+	if err != nil {
+		return nil, err
+	}
+	customer.Metadata = meta
 
 	if err := s.repo.Create(ctx, customer); err != nil {
 		return nil, err
@@ -178,7 +212,23 @@ type UpdateCustomerInput struct {
 	State         *string
 	Zip           *string
 	Country       *string
+	Line2         *string
 	Active        *bool
+
+	// Caller-owned profile fields. nil leaves a field unchanged; an empty
+	// ExternalID clears it; an empty Tags/BillingEmails slice clears the list;
+	// an all-empty ShippingAddress clears it. Metadata is merged: a nil value
+	// removes that key.
+	ExternalID      *string
+	LegalName       *string
+	Locale          *string
+	PaymentTerms    *string
+	Website         *string
+	Notes           *string
+	Tags            []string
+	BillingEmails   []string
+	ShippingAddress *domain.BillingAddress
+	Metadata        map[string]any
 
 	TaxExempt          *bool
 	TaxExemptionNumber *string
@@ -246,6 +296,51 @@ func (s *CustomerService) UpdateCustomer(ctx context.Context, input UpdateCustom
 	if input.Country != nil {
 		customer.BillingAddress.Country = *input.Country
 	}
+	if input.Line2 != nil {
+		customer.BillingAddress.Line2 = *input.Line2
+	}
+	if input.ExternalID != nil {
+		if *input.ExternalID == "" {
+			customer.ExternalID = nil
+		} else {
+			customer.ExternalID = input.ExternalID
+		}
+	}
+	if input.LegalName != nil {
+		customer.LegalName = *input.LegalName
+	}
+	if input.Locale != nil {
+		customer.Locale = *input.Locale
+	}
+	if input.PaymentTerms != nil {
+		customer.PaymentTerms = *input.PaymentTerms
+	}
+	if input.Website != nil {
+		customer.Website = *input.Website
+	}
+	if input.Notes != nil {
+		customer.Notes = *input.Notes
+	}
+	if input.Tags != nil {
+		customer.Tags = input.Tags
+	}
+	if input.BillingEmails != nil {
+		customer.BillingEmails = input.BillingEmails
+	}
+	if input.ShippingAddress != nil {
+		customer.ShippingAddress = input.ShippingAddress
+	}
+	if err := customer.NormalizeProfile(); err != nil {
+		return nil, err
+	}
+	if input.Metadata != nil {
+		meta, err := domain.MergeMetadata(customer.Metadata, input.Metadata)
+		if err != nil {
+			return nil, err
+		}
+		customer.Metadata = meta
+	}
+
 	if input.TaxExempt != nil {
 		customer.TaxExempt = *input.TaxExempt
 	}

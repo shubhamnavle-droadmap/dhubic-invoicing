@@ -763,11 +763,39 @@ paths:
                 tax_exemption_code: { type: string, description: "Provider entity-use / usage code (also the reason)." }
                 tax_exemption_expires_at: { type: string, format: date, description: "Exemption certificate expiry (YYYY-MM-DD); empty/omitted = no expiry. Past this date the buyer is charged tax again (Inc 2)." }
                 line1: { type: string }
+                line2: { type: string }
                 city: { type: string }
                 state: { type: string }
                 zip: { type: string }
                 country: { type: string, minLength: 2, maxLength: 2 }
                 active: { type: boolean }
+                external_id:
+                  type: string
+                  maxLength: 64
+                  description: >-
+                    Your own id for this customer. Unique within the workspace (a duplicate returns 409).
+                    On update, an empty string clears it.
+                legal_name: { type: string, maxLength: 200 }
+                locale: { type: string, description: "Language code such as `en` or `en-GB`." }
+                payment_terms: { type: string, maxLength: 40, description: "Free text such as `NET_30`. Stored for your use; it does not change invoice due dates." }
+                website: { type: string, maxLength: 2048 }
+                notes: { type: string, maxLength: 5000 }
+                tags:
+                  type: array
+                  maxItems: 20
+                  items: { type: string, maxLength: 40 }
+                  description: Labels for filtering (`GET /v1/customers?tag=`). On update the list is replaced; send `[]` to clear.
+                billing_emails:
+                  type: array
+                  maxItems: 10
+                  items: { type: string, format: email }
+                  description: Extra addresses that should receive invoices. On update the list is replaced; send `[]` to clear.
+                shipping_address:
+                  allOf:
+                    - $ref: '#/components/schemas/BillingAddress'
+                  description: Optional shipping address. On update, an empty object clears it.
+                metadata:
+                  $ref: '#/components/schemas/CustomerMetadata'
       responses:
         '200':
           description: Updated customer.
@@ -780,6 +808,8 @@ paths:
                     $ref: '#/components/schemas/Customer'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '404':
           $ref: '#/components/responses/NotFound'
         '401':
@@ -1412,6 +1442,8 @@ paths:
                     $ref: '#/components/schemas/Customer'
         '400':
           $ref: '#/components/responses/BadRequest'
+        '409':
+          $ref: '#/components/responses/Conflict'
         '401':
           $ref: '#/components/responses/Unauthorized'
     get:
@@ -1431,6 +1463,16 @@ paths:
           schema:
             type: string
             enum: [active, inactive]
+        - name: external_id
+          in: query
+          description: Return only the customer with this `external_id`.
+          schema:
+            type: string
+        - name: tag
+          in: query
+          description: Return only customers carrying this tag.
+          schema:
+            type: string
         - $ref: '#/components/parameters/Limit'
         - $ref: '#/components/parameters/Page'
       responses:
@@ -11315,6 +11357,8 @@ components:
           description: Exemption certificate expiry (YYYY-MM-DD). Honored through this date; past it the buyer is charged tax again. Null = no expiry on file (Inc 2).
         line1:
           type: string
+        line2:
+          type: string
         city:
           type: string
         state:
@@ -11333,6 +11377,47 @@ components:
             Nested address, accepted as an alias for the flat line1/city/state/
             zip/country fields. A flat field wins when both are supplied;
             postal_code and zip are synonyms.
+        external_id:
+          type: string
+          maxLength: 64
+          description: >-
+            Your own id for this customer. Unique within the workspace (a duplicate returns 409).
+            On update, an empty string clears it.
+        legal_name: { type: string, maxLength: 200 }
+        locale: { type: string, description: "Language code such as `en` or `en-GB`." }
+        payment_terms: { type: string, maxLength: 40, description: "Free text such as `NET_30`. Stored for your use; it does not change invoice due dates." }
+        website: { type: string, maxLength: 2048 }
+        notes: { type: string, maxLength: 5000 }
+        tags:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 40 }
+          description: Labels for filtering (`GET /v1/customers?tag=`). On update the list is replaced; send `[]` to clear.
+        billing_emails:
+          type: array
+          maxItems: 10
+          items: { type: string, format: email }
+          description: Extra addresses that should receive invoices. On update the list is replaced; send `[]` to clear.
+        shipping_address:
+          allOf:
+            - $ref: '#/components/schemas/BillingAddress'
+          description: Optional shipping address. On update, an empty object clears it.
+        metadata:
+          $ref: '#/components/schemas/CustomerMetadata'
+
+    CustomerMetadata:
+      type: object
+      maxProperties: 50
+      additionalProperties:
+        oneOf:
+          - { type: string, maxLength: 500 }
+          - { type: number }
+          - { type: boolean }
+      description: >-
+        Your own flat key/value data. Up to 50 keys, key names up to 40 characters,
+        string values up to 500 characters, 8 KB in total. Values must be strings,
+        numbers or booleans (no nested objects or arrays). On update the object is
+        merged into the stored one and a `null` value removes that key.
 
     BillingAddress:
       type: object
@@ -11411,6 +11496,34 @@ components:
           type: string
         card_fingerprint:
           type: string
+        external_id:
+          type: [string, 'null']
+          maxLength: 64
+          description: >-
+            Your own id for this customer. Unique within the workspace (a duplicate returns 409).
+            On update, an empty string clears it.
+        legal_name: { type: string, maxLength: 200 }
+        locale: { type: string, description: "Language code such as `en` or `en-GB`." }
+        payment_terms: { type: string, maxLength: 40, description: "Free text such as `NET_30`. Stored for your use; it does not change invoice due dates." }
+        website: { type: string, maxLength: 2048 }
+        notes: { type: string, maxLength: 5000 }
+        tags:
+          type: array
+          maxItems: 20
+          items: { type: string, maxLength: 40 }
+          description: Labels for filtering (`GET /v1/customers?tag=`). On update the list is replaced; send `[]` to clear.
+        billing_emails:
+          type: array
+          maxItems: 10
+          items: { type: string, format: email }
+          description: Extra addresses that should receive invoices. On update the list is replaced; send `[]` to clear.
+        shipping_address:
+          oneOf:
+            - $ref: '#/components/schemas/BillingAddress'
+            - type: 'null'
+          description: Optional shipping address. On update, an empty object clears it.
+        metadata:
+          $ref: '#/components/schemas/CustomerMetadata'
         created_at:
           type: string
           format: date-time

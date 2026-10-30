@@ -37,6 +37,18 @@ type Customer struct {
 	CardExpYear           *int                   `json:"card_exp_year,omitempty" db:"card_exp_year"`
 	CardTokenID           *string                `json:"card_token_id,omitempty" db:"card_token_id"`
 	CardFingerprint       *string                `json:"card_fingerprint,omitempty" db:"card_fingerprint"`
+	// Caller-owned profile fields. ExternalID is the integrator's own id for the
+	// customer (unique per workspace); Metadata holds flat scalar key/values.
+	ExternalID      *string         `json:"external_id" db:"external_id"`
+	LegalName       string          `json:"legal_name" db:"legal_name"`
+	Locale          string          `json:"locale" db:"locale"`
+	PaymentTerms    string          `json:"payment_terms" db:"payment_terms"`
+	Website         string          `json:"website" db:"website"`
+	Notes           string          `json:"notes" db:"notes"`
+	Tags            []string        `json:"tags" db:"tags"`
+	BillingEmails   []string        `json:"billing_emails" db:"billing_emails"`
+	ShippingAddress *BillingAddress `json:"shipping_address" db:"shipping_address"`
+	Metadata        map[string]any  `json:"metadata" db:"metadata"`
 	// Active is the soft-archive flag. Archiving is blocked while the customer
 	// has active subscriptions; archived customers keep full billing history.
 	Active    bool      `json:"active" db:"active"`
@@ -50,6 +62,7 @@ type Customer struct {
 
 type BillingAddress struct {
 	Line1   string `json:"line1"`
+	Line2   string `json:"line2,omitempty"`
 	City    string `json:"city"`
 	State   string `json:"state"`
 	Zip     string `json:"zip"`
@@ -61,6 +74,9 @@ type CustomerFilter struct {
 	Email   string // For portal lookup
 	Country string
 	Status  string // active or inactive
-	Limit   int
-	Offset  int
+	// ExternalID matches the caller's own id exactly; Tag matches customers carrying that tag.
+	ExternalID string
+	Tag        string
+	Limit      int
+	Offset     int
 }

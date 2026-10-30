@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	"github.com/recurso-dev/recurso/internal/core/domain"
 )
 
@@ -24,15 +26,21 @@ func (r *CustomerRepository) Create(ctx context.Context, customer *domain.Custom
 	if err != nil {
 		return err
 	}
+	tags, emails, shipJSON, metaJSON, err := profileArgs(customer)
+	if err != nil {
+		return err
+	}
 
 	query := `
 		INSERT INTO customers (
 			id, tenant_id, email, name, phone, tax_id,
 			line1, city, state, zip, country,
 			billing_address, ledger_account_id, gstin, tax_type, place_of_supply, created_at,
-			tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at
+			tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at,
+			external_id, legal_name, locale, payment_terms, website, notes, tags, billing_emails, shipping_address, metadata
 		)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21,
+			$22, $23, $24, $25, $26, $27, $28, $29, $30, $31)
 	`
 	_, err = r.db.ExecContext(ctx, query,
 		customer.ID, customer.TenantID, customer.Email, customer.Name,
@@ -40,8 +48,13 @@ func (r *CustomerRepository) Create(ctx context.Context, customer *domain.Custom
 		customer.BillingAddress.Line1, customer.BillingAddress.City, customer.BillingAddress.State, customer.BillingAddress.Zip, customer.BillingAddress.Country,
 		addressJSON, customer.LedgerAccountID, customer.GSTIN, customer.TaxType, customer.PlaceOfSupply, customer.CreatedAt,
 		customer.TaxExempt, customer.TaxExemptionNumber, customer.TaxExemptionCode, customer.TaxExemptionExpiresAt,
+		customer.ExternalID, customer.LegalName, customer.Locale, customer.PaymentTerms, customer.Website, customer.Notes,
+		tags, emails, shipJSON, metaJSON,
 	)
 	if err != nil {
+		if isExternalIDConflict(err) {
+			return domain.ErrCustomerExternalIDTaken
+		}
 		return fmt.Errorf("failed to insert customer: %w", err)
 	}
 
@@ -50,6 +63,10 @@ func (r *CustomerRepository) Create(ctx context.Context, customer *domain.Custom
 
 func (r *CustomerRepository) Update(ctx context.Context, customer *domain.Customer) error {
 	addressJSON, err := json.Marshal(customer.BillingAddress)
+	if err != nil {
+		return err
+	}
+	tags, emails, shipJSON, metaJSON, err := profileArgs(customer)
 	if err != nil {
 		return err
 	}
@@ -75,6 +92,16 @@ func (r *CustomerRepository) Update(ctx context.Context, customer *domain.Custom
 			tax_exemption_number = :tax_exemption_number,
 			tax_exemption_code = :tax_exemption_code,
 			tax_exemption_expires_at = :tax_exemption_expires_at,
+			external_id = :external_id,
+			legal_name = :legal_name,
+			locale = :locale,
+			payment_terms = :payment_terms,
+			website = :website,
+			notes = :notes,
+			tags = :tags,
+			billing_emails = :billing_emails,
+			shipping_address = :shipping_address,
+			metadata = :metadata,
 			active = :active,
 			updated_at = NOW()
 		WHERE id = :id AND tenant_id = :tenant_id
@@ -110,10 +137,23 @@ func (r *CustomerRepository) Update(ctx context.Context, customer *domain.Custom
 		"tax_exemption_number":     customer.TaxExemptionNumber,
 		"tax_exemption_code":       customer.TaxExemptionCode,
 		"tax_exemption_expires_at": customer.TaxExemptionExpiresAt,
+		"external_id":              customer.ExternalID,
+		"legal_name":               customer.LegalName,
+		"locale":                   customer.Locale,
+		"payment_terms":            customer.PaymentTerms,
+		"website":                  customer.Website,
+		"notes":                    customer.Notes,
+		"tags":                     tags,
+		"billing_emails":           emails,
+		"shipping_address":         shipJSON,
+		"metadata":                 metaJSON,
 		"active":                   customer.Active,
 	}
 
 	_, err = r.db.NamedExecContext(ctx, query, params)
+	if isExternalIDConflict(err) {
+		return domain.ErrCustomerExternalIDTaken
+	}
 	return err
 }
 
@@ -143,8 +183,9 @@ func (r *CustomerRepository) GetByIDPublic(ctx context.Context, id uuid.UUID) (*
 func (r *CustomerRepository) GetByReferralCode(ctx context.Context, tenantID uuid.UUID, code string) (*domain.Customer, error) {
 	var customer domain.Customer
 	var addressJSON []byte
+	var ex customerExtraScan
 	query := `
-		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at
+		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at, external_id, legal_name, locale, payment_terms, website, notes, tags, billing_emails, shipping_address, metadata
 		FROM customers
 		WHERE tenant_id = $1 AND referral_code = $2 LIMIT 1
 	`
@@ -157,6 +198,8 @@ func (r *CustomerRepository) GetByReferralCode(ctx context.Context, tenantID uui
 		&customer.Active,
 		&customer.CreatedAt, &customer.UpdatedAt,
 		&customer.TaxExempt, &customer.TaxExemptionNumber, &customer.TaxExemptionCode, &customer.TaxExemptionExpiresAt,
+		&customer.ExternalID, &customer.LegalName, &customer.Locale, &customer.PaymentTerms, &customer.Website, &customer.Notes,
+		&ex.tags, &ex.emails, &ex.ship, &ex.meta,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -168,6 +211,7 @@ func (r *CustomerRepository) GetByReferralCode(ctx context.Context, tenantID uui
 	if customer.BillingAddress.Line1 == "" && len(addressJSON) > 0 {
 		_ = json.Unmarshal(addressJSON, &customer.BillingAddress)
 	}
+	ex.apply(&customer, addressJSON)
 
 	return &customer, nil
 }
@@ -175,9 +219,10 @@ func (r *CustomerRepository) GetByReferralCode(ctx context.Context, tenantID uui
 func (r *CustomerRepository) getByIDInternal(ctx context.Context, id uuid.UUID, tenantID *uuid.UUID) (*domain.Customer, error) {
 	customer := &domain.Customer{}
 	var addressJSON []byte // We scan this but prefer individual columns if populated
+	var ex customerExtraScan
 
 	query := `
-		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at
+		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at, external_id, legal_name, locale, payment_terms, website, notes, tags, billing_emails, shipping_address, metadata
 		FROM customers WHERE id = $1
 	`
 	args := []interface{}{id}
@@ -195,6 +240,8 @@ func (r *CustomerRepository) getByIDInternal(ctx context.Context, id uuid.UUID, 
 		&customer.Active,
 		&customer.CreatedAt, &customer.UpdatedAt,
 		&customer.TaxExempt, &customer.TaxExemptionNumber, &customer.TaxExemptionCode, &customer.TaxExemptionExpiresAt,
+		&customer.ExternalID, &customer.LegalName, &customer.Locale, &customer.PaymentTerms, &customer.Website, &customer.Notes,
+		&ex.tags, &ex.emails, &ex.ship, &ex.meta,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil // Not found
@@ -210,6 +257,7 @@ func (r *CustomerRepository) getByIDInternal(ctx context.Context, id uuid.UUID, 
 	if customer.BillingAddress.Line1 == "" && len(addressJSON) > 0 {
 		_ = json.Unmarshal(addressJSON, &customer.BillingAddress)
 	}
+	ex.apply(customer, addressJSON)
 
 	return customer, nil
 }
@@ -219,7 +267,7 @@ func (r *CustomerRepository) getByIDInternal(ctx context.Context, id uuid.UUID, 
 // Never call it from tenant-scoped request paths.
 func (r *CustomerRepository) FindByEmailAcrossTenants(ctx context.Context, email string) ([]*domain.Customer, error) {
 	query := `
-		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at
+		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at, external_id, legal_name, locale, payment_terms, website, notes, tags, billing_emails, shipping_address, metadata
 		FROM customers WHERE lower(email) = lower($1)
 		ORDER BY created_at DESC
 	`
@@ -233,6 +281,7 @@ func (r *CustomerRepository) FindByEmailAcrossTenants(ctx context.Context, email
 	for rows.Next() {
 		var c domain.Customer
 		var addressJSON []byte
+		var ex customerExtraScan
 		if err := rows.Scan(
 			&c.ID, &c.TenantID, &c.Email, &c.Name,
 			&c.Phone, &c.TaxID,
@@ -242,12 +291,15 @@ func (r *CustomerRepository) FindByEmailAcrossTenants(ctx context.Context, email
 			&c.Active,
 			&c.CreatedAt, &c.UpdatedAt,
 			&c.TaxExempt, &c.TaxExemptionNumber, &c.TaxExemptionCode, &c.TaxExemptionExpiresAt,
+			&c.ExternalID, &c.LegalName, &c.Locale, &c.PaymentTerms, &c.Website, &c.Notes,
+			&ex.tags, &ex.emails, &ex.ship, &ex.meta,
 		); err != nil {
 			return nil, err
 		}
 		if c.BillingAddress.Line1 == "" && len(addressJSON) > 0 {
 			_ = json.Unmarshal(addressJSON, &c.BillingAddress)
 		}
+		ex.apply(&c, addressJSON)
 		customers = append(customers, &c)
 	}
 	if err := rows.Err(); err != nil {
@@ -258,7 +310,7 @@ func (r *CustomerRepository) FindByEmailAcrossTenants(ctx context.Context, email
 
 func (r *CustomerRepository) List(ctx context.Context, tenantID uuid.UUID, filter domain.CustomerFilter) ([]*domain.Customer, error) {
 	query := `
-		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at
+		SELECT id, tenant_id, email, name, phone, tax_id, line1, city, state, zip, country, billing_address, ledger_account_id, referral_code, gstin, tax_type, place_of_supply, card_brand, card_last4, card_exp_month, card_exp_year, active, created_at, updated_at, tax_exempt, tax_exemption_number, tax_exemption_code, tax_exemption_expires_at, external_id, legal_name, locale, payment_terms, website, notes, tags, billing_emails, shipping_address, metadata
 		FROM customers WHERE tenant_id = $1
 	`
 	args := []interface{}{tenantID}
@@ -289,6 +341,18 @@ func (r *CustomerRepository) List(ctx context.Context, tenantID uuid.UUID, filte
 		argIdx++
 	}
 
+	if filter.ExternalID != "" {
+		query += fmt.Sprintf(" AND external_id = $%d", argIdx)
+		args = append(args, filter.ExternalID)
+		argIdx++
+	}
+
+	if filter.Tag != "" {
+		query += fmt.Sprintf(" AND $%d = ANY(tags)", argIdx)
+		args = append(args, filter.Tag)
+		argIdx++
+	}
+
 	query += " ORDER BY created_at DESC"
 
 	if filter.Limit > 0 {
@@ -311,6 +375,7 @@ func (r *CustomerRepository) List(ctx context.Context, tenantID uuid.UUID, filte
 	for rows.Next() {
 		var c domain.Customer
 		var addressJSON []byte
+		var ex customerExtraScan
 		if err := rows.Scan(
 			&c.ID, &c.TenantID, &c.Email, &c.Name,
 			&c.Phone, &c.TaxID,
@@ -320,6 +385,8 @@ func (r *CustomerRepository) List(ctx context.Context, tenantID uuid.UUID, filte
 			&c.Active,
 			&c.CreatedAt, &c.UpdatedAt,
 			&c.TaxExempt, &c.TaxExemptionNumber, &c.TaxExemptionCode, &c.TaxExemptionExpiresAt,
+			&c.ExternalID, &c.LegalName, &c.Locale, &c.PaymentTerms, &c.Website, &c.Notes,
+			&ex.tags, &ex.emails, &ex.ship, &ex.meta,
 		); err != nil {
 			return nil, err
 		}
@@ -327,6 +394,7 @@ func (r *CustomerRepository) List(ctx context.Context, tenantID uuid.UUID, filte
 		if c.BillingAddress.Line1 == "" && len(addressJSON) > 0 {
 			_ = json.Unmarshal(addressJSON, &c.BillingAddress)
 		}
+		ex.apply(&c, addressJSON)
 
 		customers = append(customers, &c)
 	}
@@ -456,4 +524,68 @@ func (r *CustomerRepository) MarkCardExpiryNotificationSent(ctx context.Context,
 	`
 	_, err := r.db.ExecContext(ctx, query, tenantID, customerID, expMonth, expYear, cardLast4)
 	return err
+}
+
+// customerExtraScan receives the caller-owned profile columns for one row.
+type customerExtraScan struct {
+	tags, emails pq.StringArray
+	ship, meta   []byte
+}
+
+// apply copies the scanned profile columns onto c. addressJSON is the stored
+// billing_address document, which is where line2 lives (it has no flat column).
+func (x *customerExtraScan) apply(c *domain.Customer, addressJSON []byte) {
+	c.Tags = append([]string{}, x.tags...)
+	c.BillingEmails = append([]string{}, x.emails...)
+	c.ShippingAddress = nil
+	if len(x.ship) > 0 {
+		var a domain.BillingAddress
+		if json.Unmarshal(x.ship, &a) == nil {
+			c.ShippingAddress = &a
+		}
+	}
+	c.Metadata = map[string]any{}
+	if len(x.meta) > 0 {
+		_ = json.Unmarshal(x.meta, &c.Metadata)
+		if c.Metadata == nil {
+			c.Metadata = map[string]any{}
+		}
+	}
+	if len(addressJSON) > 0 {
+		var a struct {
+			Line2 string `json:"line2"`
+		}
+		if json.Unmarshal(addressJSON, &a) == nil {
+			c.BillingAddress.Line2 = a.Line2
+		}
+	}
+}
+
+// profileArgs prepares the profile fields for writing. Nil slices and maps are
+// stored as empty rather than NULL (the columns are NOT NULL).
+func profileArgs(c *domain.Customer) (tags, emails pq.StringArray, ship, meta []byte, err error) {
+	tags = pq.StringArray(c.Tags)
+	if tags == nil {
+		tags = pq.StringArray{}
+	}
+	emails = pq.StringArray(c.BillingEmails)
+	if emails == nil {
+		emails = pq.StringArray{}
+	}
+	if c.ShippingAddress != nil {
+		if ship, err = json.Marshal(c.ShippingAddress); err != nil {
+			return
+		}
+	}
+	m := c.Metadata
+	if m == nil {
+		m = map[string]any{}
+	}
+	meta, err = json.Marshal(m)
+	return
+}
+
+func isExternalIDConflict(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23505" && pqErr.Constraint == "uq_customers_tenant_external_id"
 }
