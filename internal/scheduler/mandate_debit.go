@@ -8,6 +8,7 @@ import (
 
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // debitClaimWindow is how far ClaimDueForDebit pushes next_debit_at when it
@@ -71,7 +72,7 @@ func (s *MandateDebitScheduler) runDebits() {
 	ctx := context.Background()
 
 	lockKey := "scheduler:mandate-debit"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for mandate debit scheduler", "error", err)
 		return
@@ -85,29 +86,31 @@ func (s *MandateDebitScheduler) runDebits() {
 		}
 	}()
 
-	// Atomically CLAIM due mandates (not just read them): the distributed lock
-	// above is a no-op without Redis, so the claim is what actually guarantees a
-	// mandate is charged by exactly one runner (ENG-161).
-	mandates, err := s.mandateRepo.ClaimDueForDebit(ctx, debitClaimWindow)
-	if err != nil {
-		slog.Error("failed to claim mandates ready for debit", "error", err)
-		return
-	}
-
-	if len(mandates) == 0 {
-		return
-	}
-
-	slog.Info("mandates ready for debit", "count", len(mandates))
-
-	for _, mandate := range mandates {
-		// Charge the subscription's real recurring amount (plan price + tax),
-		// NOT mandate.MaxAmount — MaxAmount is the authorization ceiling and
-		// debiting it over-charged ~2× every cycle (ENG-165).
-		if err := s.mandateSvc.DebitSubscription(ctx, mandate); err != nil {
-			slog.Error("failed to execute debit for mandate", "mandate_id", mandate.ID, "error", err)
-			continue
+	workspace.Each(ctx, func(ctx context.Context) {
+		// Atomically CLAIM due mandates (not just read them): the distributed lock
+		// above is a no-op without Redis, so the claim is what actually guarantees a
+		// mandate is charged by exactly one runner (ENG-161).
+		mandates, err := s.mandateRepo.ClaimDueForDebit(ctx, debitClaimWindow)
+		if err != nil {
+			slog.Error("failed to claim mandates ready for debit", "error", err)
+			return
 		}
-		slog.Info("successfully debited mandate", "mandate_id", mandate.ID)
-	}
+
+		if len(mandates) == 0 {
+			return
+		}
+
+		slog.Info("mandates ready for debit", "count", len(mandates))
+
+		for _, mandate := range mandates {
+			// Charge the subscription's real recurring amount (plan price + tax),
+			// NOT mandate.MaxAmount — MaxAmount is the authorization ceiling and
+			// debiting it over-charged ~2× every cycle (ENG-165).
+			if err := s.mandateSvc.DebitSubscription(ctx, mandate); err != nil {
+				slog.Error("failed to execute debit for mandate", "mandate_id", mandate.ID, "error", err)
+				continue
+			}
+			slog.Info("successfully debited mandate", "mandate_id", mandate.ID)
+		}
+	})
 }

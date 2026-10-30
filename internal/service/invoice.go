@@ -176,6 +176,7 @@ func invoiceEmailData(inv *domain.Invoice, customer *domain.Customer) InvoiceDat
 		CustomerEmail: customer.Email,
 		InvoiceNumber: inv.InvoiceNumber,
 		InvoiceID:     inv.ID.String(), // SendInvoiceCreated builds the /checkout/{id} Pay Now link
+		TenantID:      inv.TenantID,
 		Amount:        formatAmount(inv.Total, inv.Currency),
 		DueDate:       inv.DueDate.Format("Jan 02, 2006"),
 	}
@@ -191,7 +192,9 @@ func (s *InvoiceService) notifyInvoiceCreated(inv *domain.Invoice) {
 		return
 	}
 	safego.Go("invoice.notifyInvoiceCreated", func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		// Detached from the request, but still this invoice's workspace: the
+		// lookups below follow the tenant to its database.
+		ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), domain.TenantIDKey, inv.TenantID), 30*time.Second)
 		defer cancel()
 		customer, err := s.CustomerRepo.GetByID(ctx, inv.CustomerID)
 		if err != nil || customer == nil || customer.Email == "" {

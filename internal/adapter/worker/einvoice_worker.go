@@ -8,6 +8,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // EInvoiceRetryWorker polls for FAILED e-invoices and retries them with exponential backoff.
@@ -55,7 +56,7 @@ func (w *EInvoiceRetryWorker) Start(ctx context.Context) {
 			slog.Info("e-invoice retry worker stopping")
 			return
 		case <-ticker.C:
-			w.processRetries(ctx)
+			workspace.Each(ctx, w.processRetries)
 		}
 	}
 }

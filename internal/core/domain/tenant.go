@@ -13,6 +13,9 @@ type Tenant struct {
 	DataRegion     string     `json:"data_region" db:"data_region"`
 	BaseCurrency   string     `json:"base_currency" db:"base_currency"` // Default: "USD"
 	OrganizationID *uuid.UUID `json:"organization_id,omitempty" db:"organization_id"`
+	// DatabaseName is the tenant's dedicated database (recurso_<id>); empty means
+	// the tenant lives in the shared database.
+	DatabaseName string `json:"database_name,omitempty" db:"database_name"`
 	// Managed-cloud billing lifecycle (Phase B). BillingStatus:
 	// 'trialing' | 'active' | 'past_due' | 'canceled'. PlanTier: 'trial' |
 	// 'free' | a paid tier. TrialEndsAt is nil for non-trial tenants.

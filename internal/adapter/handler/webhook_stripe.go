@@ -132,7 +132,7 @@ func (h *WebhookHandler) handlePaymentIntentSucceeded(ctx context.Context, event
 		return fmt.Errorf("failed to load invoice %s: %w", invoiceID, err)
 	}
 	if inv == nil {
-		h.logger.Warn("stripe payment_intent.succeeded ignored — invoice not found", "invoice_id", invoiceID)
+		h.logger.Warn("stripe payment_intent.succeeded ignored — invoice not found", "invoice_id", invoiceID, "hint", unscopedWebhookHint(ctx))
 		return nil
 	}
 	if !invoiceBelongsToWebhookConn(ctx, inv) {

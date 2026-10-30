@@ -26,7 +26,8 @@ type NotificationService struct {
 	// an SPA route and MUST use this, not the API base. The API's /checkout/{id}
 	// only returns JSON that the SPA page fetches. Defaults to baseURL until
 	// SetAppBaseURL.
-	appBaseURL string
+	appBaseURL      string
+	workspaceLinker WorkspaceLinker
 }
 
 func NewNotificationService(emailSender port.EmailSender, baseURL string) *NotificationService {
@@ -36,6 +37,14 @@ func NewNotificationService(emailSender port.EmailSender, baseURL string) *Notif
 		appBaseURL:  baseURL,
 	}
 }
+
+// WorkspaceLinker adds the workspace marker (?w=<tenant>) to a customer-facing
+// link when the tenant has a dedicated database, so the public page it opens can
+// find the right database. It returns link unchanged otherwise.
+type WorkspaceLinker func(ctx context.Context, tenantID uuid.UUID, link string) string
+
+// SetWorkspaceLinker wires the linker. Nil-safe: unset, links are unchanged.
+func (s *NotificationService) SetWorkspaceLinker(l WorkspaceLinker) { s.workspaceLinker = l }
 
 // SetAppBaseURL points customer-facing links (hosted checkout, portal) at the
 // SPA host (PORTAL_URL / DASHBOARD_URL) instead of the API domain.
@@ -50,7 +59,8 @@ type InvoiceData struct {
 	CustomerName  string
 	CustomerEmail string
 	InvoiceNumber string
-	InvoiceID     string // used to build the SPA hosted-checkout link when PaymentURL is empty
+	InvoiceID     string    // used to build the SPA hosted-checkout link when PaymentURL is empty
+	TenantID      uuid.UUID // owner; lets the checkout link carry the workspace marker
 	Amount        string
 	DueDate       string
 	PaymentURL    string
@@ -64,6 +74,9 @@ func (s *NotificationService) SendInvoiceCreated(ctx context.Context, data Invoi
 	// the same path — linking the API base leaves the customer staring at raw JSON.
 	if data.PaymentURL == "" && data.InvoiceID != "" {
 		data.PaymentURL = strings.TrimRight(s.appBaseURL, "/") + "/checkout/" + data.InvoiceID
+		if s.workspaceLinker != nil && data.TenantID != uuid.Nil {
+			data.PaymentURL = s.workspaceLinker(ctx, data.TenantID, data.PaymentURL)
+		}
 	}
 
 	content, err := s.renderTemplate(email.InvoiceCreatedTemplate, data)

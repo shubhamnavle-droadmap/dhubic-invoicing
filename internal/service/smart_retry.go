@@ -72,7 +72,7 @@ func (s *SmartRetryService) SetStrategy(strategy BanditStrategy) {
 
 // GetNextRetryTime calculates the absolute time for the next retry attempt (backward-compatible wrapper)
 func (s *SmartRetryService) GetNextRetryTime(invoice *domain.Invoice) time.Time {
-	decision := s.DecideRetry(context.Background(), invoice, "GENERIC_FAILURE")
+	decision := s.DecideRetry(context.WithValue(context.Background(), domain.TenantIDKey, invoice.TenantID), invoice, "GENERIC_FAILURE")
 	if decision == nil {
 		return time.Time{}
 	}

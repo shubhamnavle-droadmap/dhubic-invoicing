@@ -5,6 +5,7 @@ import { Plus, Users, Link2 } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { endpoints } from "../lib/api";
+import { portalLoginUrl } from "../lib/portalLink";
 import { toast } from "@/components/ui/sonner";
 import { useDebounce } from "../hooks/useDebounce";
 import { useUrlState } from "@/lib/useUrlState";
@@ -85,16 +86,23 @@ export default function Customers() {
     setPage(1);
   }, [debouncedSearch, status, setPage]);
 
+  // Same cache entry as Settings/Profile. Tells us whether this workspace has a
+  // dedicated database, which changes the portal login link.
+  const { data: account } = useQuery({
+    queryKey: ["account"],
+    queryFn: async () => (await endpoints.getAccount()).data.data || null,
+  });
+
   const copyPortalLink = useCallback(
     (e, customer) => {
       e.stopPropagation();
       // The portal is entered via magic-link login; prefill the customer's
       // email. (The old /portal/{tenant}/{customer} path never existed.)
-      const url = `${window.location.origin}/portal/login?email=${encodeURIComponent(customer.email || "")}`;
+      const url = portalLoginUrl(customer.email, account);
       navigator.clipboard.writeText(url);
       toast.success("Portal link copied");
     },
-    []
+    [account]
   );
 
   const columns = useMemo(

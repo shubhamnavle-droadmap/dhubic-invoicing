@@ -210,6 +210,16 @@ paths:
         API key is still returned in the body so CLI/dev flows keep a key; it is
         shown only once.
       security: []
+      parameters:
+        - name: X-Provisioning-Token
+          in: header
+          required: false
+          schema:
+            type: string
+          description: >
+            Required only when `dedicated_database_id` is sent. Must equal the
+            deployment's `DEDICATED_DATABASES_PROVISION_TOKEN`; creating a
+            database is a privileged action on this public endpoint.
       requestBody:
         required: true
         content:
@@ -240,6 +250,17 @@ paths:
                     tenant's primary legal entity, which is the seller tax
                     jurisdiction — a US signup invoices under US sales tax from
                     day one. Omit to configure later in settings.
+                dedicated_database_id:
+                  type: string
+                  maxLength: 40
+                  pattern: '^[a-z0-9][a-z0-9_]*$'
+                  description: >
+                    Optional. Gives the workspace its own database, created as
+                    `recurso_<dedicated_database_id>` and fully migrated at
+                    signup. Lower-case letters, digits and underscores only.
+                    Requires the `X-Provisioning-Token` header (403 otherwise).
+                    Returns 400 when the deployment has not enabled dedicated
+                    databases, and 409 when that database already exists.
       responses:
         '201':
           description: Tenant, owner user, and session created. Sets recurso_session cookie.
@@ -2179,6 +2200,111 @@ paths:
         '401':
           $ref: '#/components/responses/Unauthorized'
 
+  /v1/invoices/manual:
+    post:
+      operationId: createManualInvoice
+      tags: [Invoices]
+      summary: Create an invoice from explicit line items
+      description: >-
+        Creates a one-off invoice whose lines, issuing legal entity and dates
+        you supply — for loading already-priced receivables (a billing-run
+        export). Line amounts are signed minor units: a negative line (waiver,
+        discount) reduces the total, and the net total must not be negative
+        (issue a credit note instead). No tax is applied. The invoice gets the
+        next gapless number in the issuing entity's series and posts its
+        AR → Revenue ledger leg like any other invoice. A fully-waived
+        (net 0) invoice is recorded as paid. Imported invoices are owned by
+        manual collection: the dunning scheduler never emails or retries them.
+        Send `external_ref` to make the call idempotent — replaying a key
+        returns the original invoice (200, `replayed: true`) instead of a
+        duplicate — but only when the content matches (same customer, entity,
+        currency, total and line amounts); a key reused with different content
+        is a 409 so a changed source is never silently dropped. Owner/admin
+        role required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [customer_id, currency, line_items]
+              properties:
+                customer_id: { type: string, format: uuid }
+                entity_id:
+                  type: string
+                  format: uuid
+                  description: Issuing legal entity. Omit for the tenant's primary entity.
+                currency:
+                  type: string
+                  description: ISO 4217 code, e.g. USD.
+                invoice_date:
+                  type: string
+                  description: Issue date, `YYYY-MM-DD` or RFC 3339. Defaults to now.
+                due_date:
+                  type: string
+                  description: >-
+                    `YYYY-MM-DD` or RFC 3339. Wins over `payment_terms`; must not
+                    be before `invoice_date`.
+                payment_terms:
+                  type: string
+                  description: net0, net15, net30, net60… Defaults to net30.
+                external_ref:
+                  type: string
+                  maxLength: 200
+                  description: Idempotency key, unique per tenant.
+                line_items:
+                  type: array
+                  minItems: 1
+                  maxItems: 500
+                  items:
+                    type: object
+                    required: [description, amount]
+                    properties:
+                      description: { type: string, maxLength: 500 }
+                      quantity:
+                        type: integer
+                        minimum: 0
+                        description: Defaults to 1.
+                      unit_amount:
+                        type: integer
+                        format: int64
+                        description: >-
+                          Minor units. Omit to use amount ÷ quantity; when sent,
+                          quantity × unit_amount must equal amount.
+                      amount:
+                        type: integer
+                        format: int64
+                        description: Line total in minor units; negative for a waiver or discount.
+      responses:
+        '201':
+          description: Invoice created.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Invoice'
+                  replayed: { type: boolean, example: false }
+        '200':
+          description: The `external_ref` was already used; the original invoice is returned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    $ref: '#/components/schemas/Invoice'
+                  replayed: { type: boolean, example: true }
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
   /v1/invoices/{id}:
     get:
       operationId: getInvoice
@@ -3880,6 +4006,7 @@ paths:
       description: Returns the invoice summary rendered by the hosted checkout page. Public and rate-limited.
       security: []
       parameters:
+        - $ref: '#/components/parameters/Workspace'
         - $ref: '#/components/parameters/PathID'
       responses:
         '200':
@@ -3910,6 +4037,7 @@ paths:
         see `/checkout/{id}/success` and `/checkout/{id}/razorpay/verify`.
       security: []
       parameters:
+        - $ref: '#/components/parameters/Workspace'
         - $ref: '#/components/parameters/PathID'
       responses:
         '200':
@@ -3976,6 +4104,7 @@ paths:
         invoice status is reported unchanged.
       security: []
       parameters:
+        - $ref: '#/components/parameters/Workspace'
         - $ref: '#/components/parameters/PathID'
         - name: payment_intent
           in: query
@@ -4023,6 +4152,7 @@ paths:
         remains the authoritative backstop.
       security: []
       parameters:
+        - $ref: '#/components/parameters/Workspace'
         - $ref: '#/components/parameters/PathID'
       requestBody:
         required: true
@@ -4077,6 +4207,8 @@ paths:
         Creates a payment order on the configured payment gateway. Public and rate-limited.
         Note: the response uses the gateway port's Go field names (capitalized) verbatim.
       security: []
+      parameters:
+        - $ref: '#/components/parameters/Workspace'
       requestBody:
         required: true
         content:
@@ -4468,6 +4600,8 @@ paths:
       summary: Request a magic login link
       description: Emails a passwordless login link to the customer. Always responds positively so email existence is not revealed.
       security: []
+      parameters:
+        - $ref: '#/components/parameters/Workspace'
       requestBody:
         required: true
         content:
@@ -4532,6 +4666,8 @@ paths:
         access logs. Exchanges the token for a 7-day portal session set as the
         `portal_session` cookie.
       security: []
+      parameters:
+        - $ref: '#/components/parameters/Workspace'
       requestBody:
         required: true
         content:
@@ -10557,6 +10693,19 @@ components:
         tenant API key (`bearerAuth`).
 
   parameters:
+    Workspace:
+      name: w
+      in: query
+      required: false
+      description: >-
+        Workspace (tenant) id. Only needed for a workspace created with a
+        dedicated database: links issued for it carry `?w=<tenant-id>` so this
+        unauthenticated endpoint can find the right database. Omit for every other
+        workspace. A malformed value is a 400; an id that does not match the record
+        is a 404.
+      schema:
+        type: string
+        format: uuid
     EntityIdQuery:
       name: entity_id
       in: query

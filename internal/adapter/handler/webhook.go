@@ -62,6 +62,18 @@ func webhookConnTenant(ctx context.Context) uuid.UUID {
 	return uuid.Nil
 }
 
+// unscopedWebhookHint explains a "not found" on the legacy webhook URL. A
+// workspace with a dedicated database is only reachable through its
+// per-connection URL (/webhooks/<provider>/<connection-id>); on the plain URL
+// its invoices are invisible, which otherwise looks like a payload for an
+// unknown invoice and is silently ignored. Empty on per-connection routes.
+func unscopedWebhookHint(ctx context.Context) string {
+	if webhookConnTenant(ctx) != uuid.Nil {
+		return ""
+	}
+	return "if this workspace has a dedicated database, point the gateway at /webhooks/<provider>/<connection-id>"
+}
+
 // invoiceBelongsToWebhookConn reports whether it is safe for this webhook to act
 // on inv. On a BYO (:connID) route it requires inv to belong to the connection's
 // own tenant, so a signed payload can't reference another tenant's invoice. On
@@ -106,7 +118,12 @@ func (h *WebhookHandler) webhookSecretFor(c *gin.Context, provider domain.Gatewa
 	// invoice by signing a body carrying its id (ENG-172). Stored on the request
 	// context so both the gin-context handlers (Razorpay) and the ctx-only
 	// handlers (Stripe) can read it via webhookConnTenant / invoiceBelongsToWebhookConn.
-	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), webhookConnTenantKey, conn.TenantID))
+	reqCtx := context.WithValue(c.Request.Context(), webhookConnTenantKey, conn.TenantID)
+		// Also name the tenant for database routing: the invoice lookups that follow
+		// are keyed by the payload's id alone, and a dedicated workspace's invoices
+		// live in its own database.
+		reqCtx = context.WithValue(reqCtx, domain.TenantIDKey, conn.TenantID)
+		c.Request = c.Request.WithContext(reqCtx)
 	secret, err := h.gatewayConns.OpenWebhookSecret(conn)
 	if err != nil || secret == "" {
 		// Fail closed: a connection without a webhook secret cannot be verified.

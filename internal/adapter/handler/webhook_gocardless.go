@@ -151,7 +151,7 @@ func (h *WebhookHandler) handleGoCardlessPaymentEvent(c *gin.Context, ev gcEvent
 			return err // transient lookup failure: leave unprocessed so GoCardless redelivers
 		}
 		if inv == nil {
-			h.logger.Info("no invoice references GoCardless payment, ignoring", "payment", ev.Links.Payment)
+			h.logger.Info("no invoice references GoCardless payment, ignoring", "payment", ev.Links.Payment, "hint", unscopedWebhookHint(ctx))
 			return nil
 		}
 		if !invoiceBelongsToWebhookConn(ctx, inv) {

@@ -53,6 +53,32 @@ func (r *TenantRepository) CreateTenant(ctx context.Context, tenant *domain.Tena
 	return err
 }
 
+// SetDatabaseName records the tenant's dedicated database. It refuses to
+// overwrite an existing assignment: moving a workspace between databases needs a
+// data copy, not a column update.
+func (r *TenantRepository) SetDatabaseName(ctx context.Context, tenantID uuid.UUID, name string) error {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE tenants SET database_name = $1, updated_at = NOW() WHERE id = $2 AND database_name IS NULL`,
+		name, tenantID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("tenant %s not found or already has a dedicated database", tenantID)
+	}
+	return nil
+}
+
+// GetDatabaseName returns the tenant's dedicated database name, or "" when it
+// uses the shared database.
+func (r *TenantRepository) GetDatabaseName(ctx context.Context, tenantID uuid.UUID) (string, error) {
+	var name sql.NullString
+	if err := r.db.QueryRowContext(ctx, `SELECT database_name FROM tenants WHERE id = $1`, tenantID).Scan(&name); err != nil {
+		return "", err
+	}
+	return name.String, nil
+}
+
 // CreateAPIKey hashes the key with bcrypt before storing. The original key is
 // returned in the APIKey struct but is never stored in the database.
 func (r *TenantRepository) CreateAPIKey(ctx context.Context, key *domain.APIKey) error {
@@ -259,4 +285,24 @@ func (r *TenantRepository) ListAPIKeys(ctx context.Context, tenantID uuid.UUID) 
 		return nil, err
 	}
 	return keys, nil
+}
+
+// ListDedicatedTenantIDs returns the workspaces that have their own database,
+// oldest first. Background jobs use it to visit each of them.
+func (r *TenantRepository) ListDedicatedTenantIDs(ctx context.Context) ([]uuid.UUID, error) {
+	rows, err := r.db.QueryContext(ctx,
+		`SELECT id FROM tenants WHERE database_name IS NOT NULL ORDER BY created_at, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

@@ -8,6 +8,10 @@ const PortalVerify = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const token = searchParams.get("token");
+  // ?w=<workspace> is present for dedicated-database workspaces; the API needs it
+  // to find the magic link. Kept on the error redirects so retrying still works.
+  const workspace = searchParams.get("w");
+  const wq = workspace ? `w=${encodeURIComponent(workspace)}` : "";
   // The magic-link token is single-use, and React StrictMode double-invokes
   // effects in dev — the second verify would consume an already-used token and
   // bounce a successfully logged-in customer to the error page.
@@ -32,7 +36,7 @@ const PortalVerify = () => {
         // sent in Referer). credentials: "include" lets the browser store the
         // httpOnly session cookie the server sets on success — the session is
         // never exposed to JS.
-        const response = await fetch(`${API_BASE}/portal/auth/verify`, {
+        const response = await fetch(`${API_BASE}/portal/auth/verify${wq ? `?${wq}` : ""}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           credentials: "include",
@@ -42,15 +46,15 @@ const PortalVerify = () => {
         if (response.ok) {
           navigate("/portal/dashboard");
         } else {
-          navigate("/portal/login?error=invalid");
+          navigate(`/portal/login?error=invalid${wq ? `&${wq}` : ""}`);
         }
       } catch {
-        navigate("/portal/login?error=network");
+        navigate(`/portal/login?error=network${wq ? `&${wq}` : ""}`);
       }
     };
 
     verifyToken();
-  }, [token, navigate]);
+  }, [token, navigate, wq]);
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-muted">

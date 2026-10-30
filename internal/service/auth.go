@@ -123,6 +123,17 @@ type AuthService struct {
 	// signupContactSync upserts each new signup into the operator's marketing
 	// tool (Brevo). nil-safe / opt-in via ConfigureSignupContactSync.
 	signupContactSync signupContactSync
+
+	// dedicatedDBs gives a new workspace its own database when the signup asks
+	// for one. nil (feature off) rejects such requests; signups that don't ask
+	// are unaffected either way.
+	dedicatedDBs dedicatedDatabases
+}
+
+// ConfigureDedicatedDatabases enables dedicated per-workspace databases at
+// signup (DEDICATED_DATABASES_ENABLED). nil-safe / opt-in.
+func (s *AuthService) ConfigureDedicatedDatabases(d dedicatedDatabases) {
+	s.dedicatedDBs = d
 }
 
 // ConfigureSignupNotify wires the new-signup alert. Both the recipient
@@ -263,6 +274,15 @@ func (s *AuthService) SetCloudProvisioner(fn func(ctx context.Context, tenant *d
 // business country (ISO-2); when provided it is stamped on the primary entity
 // so the seller tax jurisdiction is right from the first invoice.
 func (s *AuthService) Register(ctx context.Context, companyName, name, email, password, userAgent, country string) (*RegisterResult, error) {
+	return s.RegisterWithDatabase(ctx, companyName, name, email, password, userAgent, country, "")
+}
+
+// RegisterWithDatabase is Register plus an optional dedicated database: a
+// non-empty databaseID creates recurso_<databaseID>, migrates it and records it
+// as the new workspace's database. The database is built before the tenant row
+// exists and dropped again if signup fails, so a failed signup leaves nothing
+// behind and a retry with the same id works.
+func (s *AuthService) RegisterWithDatabase(ctx context.Context, companyName, name, email, password, userAgent, country, databaseID string) (*RegisterResult, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
 	if len(password) < minPasswordLen {
 		return nil, domain.ErrWeakPassword
@@ -281,9 +301,42 @@ func (s *AuthService) Register(ctx context.Context, companyName, name, email, pa
 		return nil, domain.ErrDuplicateEmail
 	}
 
+	// Dedicated database first: it is the step most likely to fail (privileges,
+	// name taken), and failing here leaves no tenant behind.
+	databaseID = strings.TrimSpace(databaseID)
+	dbName := ""
+	if databaseID != "" {
+		if s.dedicatedDBs == nil {
+			return nil, ErrDedicatedDatabaseDisabled
+		}
+		if dbName, err = s.dedicatedDBs.Provision(ctx, databaseID); err != nil {
+			return nil, err
+		}
+	}
+	// dropNewDB undoes Provision. A fresh context is used because ctx may already
+	// be canceled on the failure paths that call it.
+	dropNewDB := func() {
+		if dbName == "" {
+			return
+		}
+		bg, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		if derr := s.dedicatedDBs.Drop(bg, databaseID); derr != nil {
+			s.logger.WarnContext(ctx, "failed to drop dedicated database after a failed signup", "database", dbName, "error", derr)
+		}
+	}
+
 	tenant, apiKey, err := s.tenants.Register(ctx, companyName, email)
 	if err != nil {
+		dropNewDB()
 		return nil, err
+	}
+	if dbName != "" {
+		if err := s.dedicatedDBs.Assign(ctx, tenant, dbName); err != nil {
+			dropNewDB()
+			return nil, fmt.Errorf("failed to assign dedicated database: %w", err)
+		}
+		tenant.DatabaseName = dbName
 	}
 
 	// Declared business country → primary entity. Best-effort: a failure here

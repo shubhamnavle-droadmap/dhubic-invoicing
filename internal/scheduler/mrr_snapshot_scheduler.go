@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // TenantRepoForMRRSnapshot is the narrow tenant listing the scheduler needs.
@@ -73,7 +74,7 @@ func (s *MRRSnapshotScheduler) Stop() {
 func (s *MRRSnapshotScheduler) run() {
 	ctx := context.Background()
 
-	release, acquired, err := s.locker.Obtain(ctx, "scheduler:mrr-snapshot", 30*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, "scheduler:mrr-snapshot", workspace.LockTTL(30*time.Minute))
 	if err != nil {
 		slog.Error("MRR snapshot: failed to obtain lock", "error", err)
 		return
@@ -94,7 +95,7 @@ func (s *MRRSnapshotScheduler) run() {
 	}
 	now := time.Now()
 	for _, tenant := range tenants {
-		n, err := s.capturer.CaptureMRRSnapshot(ctx, tenant.ID, now)
+		n, err := s.capturer.CaptureMRRSnapshot(workspace.With(ctx, tenant.ID), tenant.ID, now)
 		if err != nil {
 			slog.Error("MRR snapshot capture failed for tenant", "tenant_id", tenant.ID, "error", err)
 			continue

@@ -228,6 +228,35 @@ func (r *InvoiceRepository) CreateWithTx(ctx context.Context, tx *sql.Tx, inv *d
 	return nil
 }
 
+// SetExternalRefWithTx stamps the caller-supplied idempotency key onto an
+// invoice inside the transaction that created it. The partial unique index on
+// (tenant_id, external_ref) makes a duplicate key fail the whole transaction
+// (IsUniqueViolation), which also returns the gapless invoice number.
+func (r *InvoiceRepository) SetExternalRefWithTx(ctx context.Context, tx *sql.Tx, tenantID, invoiceID uuid.UUID, ref string) error {
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE invoices SET external_ref = $1 WHERE id = $2 AND tenant_id = $3`,
+		ref, invoiceID, tenantID); err != nil {
+		return fmt.Errorf("set invoice external_ref: %w", err)
+	}
+	return nil
+}
+
+// GetIDByExternalRef resolves the invoice previously created under a
+// caller-supplied idempotency key, tenant-scoped. found is false when the key
+// has not been used.
+func (r *InvoiceRepository) GetIDByExternalRef(ctx context.Context, tenantID uuid.UUID, ref string) (id uuid.UUID, found bool, err error) {
+	err = r.db.QueryRowContext(ctx,
+		`SELECT id FROM invoices WHERE tenant_id = $1 AND external_ref = $2`,
+		tenantID, ref).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return uuid.Nil, false, nil
+	}
+	if err != nil {
+		return uuid.Nil, false, fmt.Errorf("lookup invoice by external_ref: %w", err)
+	}
+	return id, true, nil
+}
+
 func (r *InvoiceRepository) GetByID(ctx context.Context, id uuid.UUID) (*domain.Invoice, error) {
 	tenantID, ok := ctx.Value(domain.TenantIDKey).(uuid.UUID)
 	if !ok {

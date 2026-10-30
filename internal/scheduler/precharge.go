@@ -12,6 +12,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // PreChargeScheduler handles 24-hour pre-charge notifications
@@ -85,7 +86,7 @@ func (s *PreChargeScheduler) runPreChargeNotifications() {
 
 	// Distributed Lock: Prevent multiple instances from running this job
 	lockKey := "scheduler:pre-charge"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for pre-charge scheduler", "error", err)
 		return
@@ -100,43 +101,45 @@ func (s *PreChargeScheduler) runPreChargeNotifications() {
 		}
 	}()
 
-	subscriptions, err := s.subscriptionRepo.GetSubscriptionsDueTomorrow(ctx)
-	if err != nil {
-		slog.Error("failed to fetch subscriptions for pre-charge", "error", err)
-		return
-	}
-
-	if len(subscriptions) == 0 {
-		slog.Info("no subscriptions due tomorrow for pre-charge notification")
-		return
-	}
-
-	slog.Info("found subscriptions due tomorrow for pre-charge notification", "count", len(subscriptions))
-
-	for _, sub := range subscriptions {
-		// Send pre-charge reminder email
-		data := email.PreChargeEmailData{
-			CustomerName:  sub.CustomerName,
-			CustomerEmail: sub.CustomerEmail,
-			PlanName:      sub.PlanName,
-			Amount:        formatAmount(sub.Amount, sub.Currency),
-			ChargeDate:    sub.NextBillingDate,
-			PaymentMethod: "•••• " + sub.PaymentMethodLast4,
-			PortalURL:     s.portalBaseURL + "/portal",
+	workspace.Each(ctx, func(ctx context.Context) {
+		subscriptions, err := s.subscriptionRepo.GetSubscriptionsDueTomorrow(ctx)
+		if err != nil {
+			slog.Error("failed to fetch subscriptions for pre-charge", "error", err)
+			return
 		}
 
-		if err := s.notificationSvc.SendPreChargeReminder(ctx, data); err != nil {
-			slog.Error("failed to send pre-charge notification", "subscription_id", sub.ID, "error", err)
-			continue
+		if len(subscriptions) == 0 {
+			slog.Info("no subscriptions due tomorrow for pre-charge notification")
+			return
 		}
 
-		// Mark as sent
-		if err := s.subscriptionRepo.MarkPreChargeNotificationSent(ctx, sub.ID, sub.NextBillingDate); err != nil {
-			slog.Error("failed to mark pre-charge notification as sent", "subscription_id", sub.ID, "error", err)
-		}
+		slog.Info("found subscriptions due tomorrow for pre-charge notification", "count", len(subscriptions))
 
-		slog.Info("sent pre-charge notification", "subscription_id", sub.ID, "customer_email", sub.CustomerEmail)
-	}
+		for _, sub := range subscriptions {
+			// Send pre-charge reminder email
+			data := email.PreChargeEmailData{
+				CustomerName:  sub.CustomerName,
+				CustomerEmail: sub.CustomerEmail,
+				PlanName:      sub.PlanName,
+				Amount:        formatAmount(sub.Amount, sub.Currency),
+				ChargeDate:    sub.NextBillingDate,
+				PaymentMethod: "•••• " + sub.PaymentMethodLast4,
+				PortalURL:     workspace.Link(ctx, s.portalBaseURL+"/portal"),
+			}
+
+			if err := s.notificationSvc.SendPreChargeReminder(ctx, data); err != nil {
+				slog.Error("failed to send pre-charge notification", "subscription_id", sub.ID, "error", err)
+				continue
+			}
+
+			// Mark as sent
+			if err := s.subscriptionRepo.MarkPreChargeNotificationSent(ctx, sub.ID, sub.NextBillingDate); err != nil {
+				slog.Error("failed to mark pre-charge notification as sent", "subscription_id", sub.ID, "error", err)
+			}
+
+			slog.Info("sent pre-charge notification", "subscription_id", sub.ID, "customer_email", sub.CustomerEmail)
+		}
+	})
 }
 
 func formatAmount(amountPaise int64, currency string) string {

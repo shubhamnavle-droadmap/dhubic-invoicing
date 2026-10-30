@@ -55,6 +55,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/scheduler"
 	"github.com/recurso-dev/recurso/internal/service"
 	"github.com/recurso-dev/recurso/internal/validate"
+	"github.com/recurso-dev/recurso/internal/workspace"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -74,6 +75,16 @@ func init() {
 			version = rev
 		}
 	}
+}
+
+// envInt reads a positive integer from the environment, else fallback.
+func envInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return fallback
 }
 
 func getEnvDefault(key, fallback string) string {
@@ -146,28 +157,77 @@ func main() {
 	}
 
 	// 3. Initialize Repositories
-	dbx := sqlx.NewDb(database, "postgres")
 
-	planRepo := db.NewPlanRepository(database)
-	customerRepo := db.NewCustomerRepository(dbx)
-	subscriptionRepo := db.NewSubscriptionRepository(database)
-	invoiceRepo := db.NewInvoiceRepository(database)
-	entitlementRepo := db.NewEntitlementRepository(database) // Entitlement Engine v1
-	usageRepo := db.NewUsageRepository(database)
-	couponRepo := db.NewCouponRepository(database)                       // P7
+	// Per-workspace database routing (opt-in, DEDICATED_DATABASES_ENABLED=true).
+	// routedDB looks like any *sql.DB but each query goes to the database of the
+	// tenant on its context: a workspace created with a dedicated_database_id
+	// reaches its own recurso_<id> database, everyone else the shared one. With
+	// the flag off it IS the shared handle, so nothing changes.
+	//
+	// Only the repositories listed below use it so far (customers, invoices,
+	// entities, ledger, transactions). Everything else — logins, sessions, API
+	// keys, plans, subscriptions, … — stays on the shared database, so a dedicated
+	// workspace is not yet fully isolated. Convert further repositories by
+	// passing routedDB/routedDBX instead of database/dbx.
+	routedDB := database
+	var tenantRouter *db.TenantRouter
+	// Adds ?w=<tenant> to customer-facing links of dedicated-database tenants so the
+	// public pages they open (checkout, portal) can find the right database.
+	// Nil when the feature is off, which leaves every link unchanged.
+	var workspaceLinker service.WorkspaceLinker
+	if os.Getenv("DEDICATED_DATABASES_ENABLED") == "true" {
+		tenantRouter = db.NewTenantRouter(database, 60*time.Second)
+		workspaceLinker = func(ctx context.Context, tenantID uuid.UUID, link string) string {
+			name, err := tenantRouter.Route(context.WithValue(ctx, domain.TenantIDKey, tenantID))
+			if err != nil || name == "" {
+				return link
+			}
+			return middleware.WithWorkspaceParam(link, tenantID)
+		}
+		// New workspaces are cloned from this migrated template (~0.3 s instead of
+		// running every migration). Not fatal: provisioning falls back to migrating.
+		tplCtx, tplCancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		if err := db.EnsureTenantTemplate(tplCtx, dbURL); err != nil {
+			log.Printf("WARN: tenant template database not ready, provisioning will migrate instead: %v", err)
+		}
+		tplCancel()
+		routedDB, err = db.NewRoutedDB(dbURL, tenantRouter.Route, db.RoutedDBOptions{
+			// Per replica. Server connections <= MaxOpen + MaxCached, times the
+			// number of API replicas, must stay under Postgres max_connections.
+			MaxOpen:        envInt("DEDICATED_DB_MAX_OPEN", 25),
+			MaxCachedConns: envInt("DEDICATED_DB_MAX_CACHED", 200),
+			MaxCachedPerDB: envInt("DEDICATED_DB_MAX_CACHED_PER_DB", 2),
+			// Apply pending migrations the first time this process uses a dedicated
+			// database, so a release reaches every workspace without a fleet job.
+			OnFirstUse: func(ctx context.Context, _ string, dsn string) error { return db.PrepareTenantDatabase(ctx, dsn) },
+		})
+		if err != nil {
+			log.Fatalf("Failed to open routed database handle: %v", err)
+		}
+		defer func() { _ = routedDB.Close() }()
+	}
+	routedDBX := sqlx.NewDb(routedDB, "postgres")
+
+	planRepo := db.NewPlanRepository(routedDB)
+	customerRepo := db.NewCustomerRepository(routedDBX) // routed per workspace
+	subscriptionRepo := db.NewSubscriptionRepository(routedDB)
+	invoiceRepo := db.NewInvoiceRepository(routedDB)         // routed per workspace
+	entitlementRepo := db.NewEntitlementRepository(routedDB) // Entitlement Engine v1
+	usageRepo := db.NewUsageRepository(routedDB)
+	couponRepo := db.NewCouponRepository(routedDB)                       // P7
 	tenantRepo := db.NewTenantRepository(database)                       // P8
-	unbilledChargeRepo := db.NewUnbilledChargeRepository(database)       // P15
-	subscriptionAddonRepo := db.NewSubscriptionAddonRepository(database) // Multi-product catalog v1
-	webhookEndpointRepo := db.NewWebhookEndpointRepository(database)     // P24
-	eventRepo := db.NewEventRepository(database)                         // P24
-	eventDeliveryRepo := db.NewEventDeliveryRepository(database)         // P24
-	magicLinkRepo := db.NewMagicLinkRepository(database)                 // P25
-	portalSessionRepo := db.NewPortalSessionRepository(database)         // P25
-	quoteRepo := db.NewQuoteRepository(database)                         // P27
-	disputeRepo := db.NewDisputeRepository(database)                     // Track 2: invoice disputes
+	unbilledChargeRepo := db.NewUnbilledChargeRepository(routedDB)       // P15
+	subscriptionAddonRepo := db.NewSubscriptionAddonRepository(routedDB) // Multi-product catalog v1
+	webhookEndpointRepo := db.NewWebhookEndpointRepository(routedDB)     // P24
+	eventRepo := db.NewEventRepository(routedDB)                         // P24
+	eventDeliveryRepo := db.NewEventDeliveryRepository(routedDB)         // P24
+	magicLinkRepo := db.NewMagicLinkRepository(routedDB)                 // P25
+	portalSessionRepo := db.NewPortalSessionRepository(routedDB)         // P25
+	quoteRepo := db.NewQuoteRepository(routedDB)                         // P27
+	disputeRepo := db.NewDisputeRepository(routedDB)                     // Track 2: invoice disputes
 
 	// Create sqlx wrapper for CreditNoteRepository
-	creditNoteRepo := db.NewCreditNoteRepository(dbx) // P23
+	creditNoteRepo := db.NewCreditNoteRepository(routedDBX) // P23
 
 	// Notifications (P29)
 	notifier := notification.NewConsoleNotifier()
@@ -212,7 +272,7 @@ func main() {
 	// notificationService is wired to subscriptionService, webhookHandler, schedulers, and cancellationHandler below
 
 	// Ledger (P5) — dual-write: PG (always) + TigerBeetle (optional)
-	ledgerRepo := db.NewLedgerRepository(database)
+	ledgerRepo := db.NewLedgerRepository(routedDB) // routed per workspace
 	var ledgerService *service.LedgerService
 	tbAddr := getEnvDefault("TIGERBEETLE_ADDRESS", "127.0.0.1:3001")
 	var tbClientForRecon *tigerbeetle.LedgerClient
@@ -229,7 +289,7 @@ func main() {
 	// Ledger reconciliation: on-demand drift detection between billing
 	// records (invoices) and the Postgres ledger.
 	reconciliationService := service.NewReconciliationService(ledgerRepo, tbClientForRecon)
-	reconciliationService.SetRunStore(db.NewReconciliationRunRepository(database)) // run-history audit trail
+	reconciliationService.SetRunStore(db.NewReconciliationRunRepository(routedDB)) // run-history audit trail
 	reconciliationService.SetReportingResolver(ledgerService)                      // label discrepancy amounts with the tenant's reporting currency
 
 	// 5. Initialize Gateways
@@ -312,9 +372,9 @@ func main() {
 	_ = cardVault // Available for SmartRouter or payment handlers
 
 	// P25: IRP & GST Config Repositories
-	irpConfigRepo := db.NewIRPConfigRepository(database)
-	gstConfigRepo := db.NewGSTConfigRepository(database)
-	taxNexusRepo := db.NewTaxNexusRepository(database)
+	irpConfigRepo := db.NewIRPConfigRepository(routedDB)
+	gstConfigRepo := db.NewGSTConfigRepository(routedDB)
+	taxNexusRepo := db.NewTaxNexusRepository(routedDB)
 
 	// P25: GSP Adapter — use NIC if private key is available, else mock.
 	// DEMO_MODE: forced to mock below — a demo must never submit an IRN.
@@ -375,7 +435,7 @@ func main() {
 	// becomes the seller jurisdiction when there's no GST registration — so a US
 	// tenant is treated as a US seller (sales tax, no GST) without env config.
 	{
-		entityCountryRepo := db.NewEntityRepository(database)
+		entityCountryRepo := db.NewEntityRepository(routedDB)
 		taxResolver = taxResolver.WithPrimaryEntityCountry(func(ctx context.Context, tenantID uuid.UUID) string {
 			e, err := entityCountryRepo.GetPrimary(ctx, tenantID)
 			if err != nil || e == nil {
@@ -413,7 +473,7 @@ func main() {
 	// same vault as gateways. Env config stays the fallback. Per-tenant sales-tax
 	// providers resolve at invoice time; the same residency guard as the env
 	// provider applies (a tenant's TaxJar is still SaaS egress).
-	integrationConnService := service.NewIntegrationConnectionService(db.NewIntegrationConnectionRepository(database), gatewayVault)
+	integrationConnService := service.NewIntegrationConnectionService(db.NewIntegrationConnectionRepository(routedDB), gatewayVault)
 	// Only self-hosted single-tenant may point integration endpoints at private
 	// hosts (e.g. an internal MinIO); multi-tenant blocks it (SSRF guard).
 	integrationConnService.SetAllowPrivateEgress(residency.SelfHosted())
@@ -452,9 +512,9 @@ func main() {
 
 	// Usage-based billing v1 (spec_usage_billing.md): billable metrics,
 	// plan charges, and rating of usage into metered invoice lines.
-	billableMetricRepo := db.NewBillableMetricRepository(database)
-	chargeRepo := db.NewChargeRepository(database)
-	usageRatingRepo := db.NewUsageRatingRepository(database)
+	billableMetricRepo := db.NewBillableMetricRepository(routedDB)
+	chargeRepo := db.NewChargeRepository(routedDB)
+	usageRatingRepo := db.NewUsageRatingRepository(routedDB)
 	invoiceService.ChargeRepo = chargeRepo
 	invoiceService.UsageRepo = usageRepo
 	invoiceService.RatingRepo = usageRatingRepo
@@ -462,7 +522,7 @@ func main() {
 	// A5 progressive billing: the watermark repo + the ledger poster interim
 	// invoices use (billProgressive posts DR AR / CR Revenue itself). The repo is
 	// also the sweep scheduler's candidate source (wired below).
-	progressiveBillingRepo := db.NewProgressiveBillingRepository(database)
+	progressiveBillingRepo := db.NewProgressiveBillingRepository(routedDB)
 	invoiceService.SetProgressiveBilling(progressiveBillingRepo, ledgerService)
 
 	catalogService := service.NewCatalogService(planRepo)
@@ -493,7 +553,38 @@ func main() {
 	// A registration's declared country lands on the primary entity, which is
 	// the seller tax jurisdiction for non-GST tenants — so a US signup invoices
 	// under US sales tax from day one instead of the env default.
-	authService.SetPrimaryCountrySetter(db.NewEntityRepository(database).SetPrimaryCountry)
+	sharedEntities := db.NewEntityRepository(database)
+	authService.SetPrimaryCountrySetter(func(ctx context.Context, tenantID uuid.UUID, country string) error {
+		if err := sharedEntities.SetPrimaryCountry(ctx, tenantID, country); err != nil {
+			return err
+		}
+		// A dedicated workspace keeps its own copy of the primary entity (created by
+		// the tenants trigger when the row was seeded); stamp that one too, or the
+		// seller jurisdiction would fall back to env defaults for its invoices.
+		if tenantRouter != nil {
+			tctx := context.WithValue(ctx, domain.TenantIDKey, tenantID)
+			if name, err := tenantRouter.Route(tctx); err == nil && name != "" {
+				return db.NewEntityRepository(routedDB).SetPrimaryCountry(tctx, tenantID, country)
+			}
+		}
+		return nil
+	})
+	// Dedicated per-workspace databases (opt-in): a signup that passes
+	// dedicated_database_id gets its own recurso_<id> database, created with the
+	// application's own DATABASE_URL role (which must be allowed to CREATE
+	// DATABASE). Off by default — such signups are rejected.
+	if os.Getenv("DEDICATED_DATABASES_ENABLED") == "true" {
+		// Background jobs also visit every dedicated workspace (see internal/workspace).
+		workspace.Configure(tenantRepo.ListDedicatedTenantIDs)
+		// One lock covers a job's whole pass over every workspace, so lengthen the lease.
+		workspace.SetLockFactor(envInt("DEDICATED_JOB_LOCK_FACTOR", 3))
+		dbManager := service.NewTenantDatabaseManager(dbURL, tenantRepo)
+		dbManager.OnAssign(tenantRouter.Forget) // new route takes effect immediately
+		// Hard ceiling on dedicated databases (0 = unlimited).
+		dbManager.SetMaxDatabases(envInt("DEDICATED_DATABASES_MAX", 0))
+		authService.ConfigureDedicatedDatabases(dbManager)
+		log.Println("Dedicated per-workspace databases enabled")
+	}
 	// Recurso Cloud self-billing ("Recurso runs on Recurso"): when
 	// PLATFORM_TENANT_ID names the founder's own tenant, every signup is
 	// mirrored as a Customer inside that tenant's account, and existing tenants
@@ -546,10 +637,10 @@ func main() {
 	creditNoteService := service.NewCreditNoteService(creditNoteRepo, customerRepo, invoiceRepo, tenantGateway) // P23 + refunds
 	creditNoteService.SetLedgerService(ledgerService)
 	creditNoteService.SetNotifier(notificationService) // email the customer at refund/credit issuance
-	txManager := db.NewTxManager(database)
+	txManager := db.NewTxManager(routedDB)             // routed per workspace
 
 	// Revenue Recognition (P5)
-	revrecRepo := db.NewRevRecRepository(database)
+	revrecRepo := db.NewRevRecRepository(routedDB)
 	revrecService := service.NewRevRecService(revrecRepo, ledgerService, subscriptionRepo)
 	// Unwind deferred revenue when a refund is issued (ENG-147).
 	creditNoteService.SetRevRecService(revrecService)
@@ -580,18 +671,18 @@ func main() {
 	// transport. Opt-in per tenant (tenant_eu_config.enabled); a mock transport
 	// stands in until a real Peppol Access Point is wired. Nil-safe end to end —
 	// tenants without config are untouched.
-	euInvoiceRepo := db.NewEUInvoiceRepository(database)
+	euInvoiceRepo := db.NewEUInvoiceRepository(routedDB)
 	euEInvoiceService := service.NewEUEInvoiceService(
-		db.NewTenantEUConfigRepository(database),
+		db.NewTenantEUConfigRepository(routedDB),
 		euInvoiceRepo,
 		einvoice_eu.NewMockTransport(),
 	)
 	invoiceService.EUEInvoiceService = euEInvoiceService
 	invoiceService.NotificationService = notificationService // email the customer their invoice + Pay Now link on generation
 	subscriptionService.SetEInvoiceService(einvoiceService)
-	subscriptionService.SetPaymentAttemptLister(db.NewPaymentAttemptRepository(database))             // invoice payment-attempt history
-	subscriptionService.SetInvoiceStatusHistoryReader(db.NewInvoiceStatusHistoryRepository(database)) // invoice status timeline
-	subscriptionService.SetSubscriptionHistoryReader(db.NewSubscriptionHistoryRepository(database))   // subscription status+plan timeline
+	subscriptionService.SetPaymentAttemptLister(db.NewPaymentAttemptRepository(routedDB))             // invoice payment-attempt history
+	subscriptionService.SetInvoiceStatusHistoryReader(db.NewInvoiceStatusHistoryRepository(routedDB)) // invoice status timeline
+	subscriptionService.SetSubscriptionHistoryReader(db.NewSubscriptionHistoryRepository(routedDB))   // subscription status+plan timeline
 	subscriptionService.SetNotificationService(notificationService)
 	subscriptionService.SetFinalUsageInvoicer(invoiceService) // metered final invoice on immediate cancel
 	// Persist downgrade proration credits as spendable adjustment credit notes (ENG-150).
@@ -627,23 +718,23 @@ func main() {
 	invoiceService.Telemetry = telemetryClient
 
 	// Phase 2: Mandate Repository
-	mandateRepo := db.NewMandateRepository(database)
+	mandateRepo := db.NewMandateRepository(routedDB)
 
 	// Phase 2: Offline Payment Repository
-	offlinePaymentRepo := db.NewOfflinePaymentRepository(database)
+	offlinePaymentRepo := db.NewOfflinePaymentRepository(routedDB)
 
 	// Phase 2: Organization Repository
 	orgRepo := db.NewOrganizationRepository(database)
 
 	// Phase 2: Accounting Connection Repository
-	acctConnRepo := db.NewAccountingConnectionRepository(database)
+	acctConnRepo := db.NewAccountingConnectionRepository(routedDB)
 	acctConnRepo.SetVault(gatewayVault) // encrypt OAuth tokens at rest (opportunistic; legacy plaintext still reads)
 
 	// Accounting entity mappings (internal ID -> provider ID per connection)
-	acctMappingRepo := db.NewAccountingMappingRepository(database)
+	acctMappingRepo := db.NewAccountingMappingRepository(routedDB)
 
 	// AI Service (P45)
-	dunningRepo := db.NewDunningRepository(database)
+	dunningRepo := db.NewDunningRepository(routedDB)
 	retryService := service.NewSmartRetryService(dunningRepo)
 	if strategy := os.Getenv("DUNNING_STRATEGY"); strategy != "" {
 		retryService.SetStrategy(service.BanditStrategy(strategy))
@@ -652,14 +743,14 @@ func main() {
 	churnService := service.NewChurnService(customerRepo, invoiceRepo)
 	churnService.SetSubscriptionRepo(subscriptionRepo)
 	churnService.SetPlanRepo(planRepo)
-	churnService.SetDB(database)
+	churnService.SetDB(routedDB)
 
 	// Cancel Flows
-	cancelFlowRepo := db.NewCancelFlowRepository(database)
+	cancelFlowRepo := db.NewCancelFlowRepository(routedDB)
 	cancelFlowService := service.NewCancelFlowService(cancelFlowRepo, subscriptionService, notificationService)
 
 	// Dunning Campaigns
-	dunningCampaignRepo := db.NewDunningCampaignRepository(database)
+	dunningCampaignRepo := db.NewDunningCampaignRepository(routedDB)
 	var smsSender port.SMSSender
 	if twilioSID := os.Getenv("TWILIO_ACCOUNT_SID"); twilioSID != "" {
 		smsSender = sms.NewTwilioSMSSender(twilioSID, os.Getenv("TWILIO_AUTH_TOKEN"), os.Getenv("TWILIO_FROM_NUMBER"))
@@ -671,7 +762,7 @@ func main() {
 	dunningCampaignService := service.NewDunningCampaignService(dunningCampaignRepo, invoiceRepo, customerRepo, notificationService, smsSender)
 
 	// Dunning Recovery Attribution — provable recovered revenue
-	recoveredPaymentRepo := db.NewRecoveredPaymentRepository(database)
+	recoveredPaymentRepo := db.NewRecoveredPaymentRepository(routedDB)
 	dunningRecoveryService := service.NewDunningRecoveryService(recoveredPaymentRepo, os.Getenv("DUNNING_STRATEGY"))
 	dunningRecoveryService.SetCampaignLookup(dunningCampaignRepo)
 	dunningRecoveryService.SetFX(fxProvider, fxFallback, reportingCurrency)
@@ -688,7 +779,7 @@ func main() {
 	ledgerService.SetReporting(tenantRepo, reportingCurrency)
 	// Per-entity ledger resolution (Multi-Entity Books): postings resolve their
 	// legal entity's ledger; without this they use the primary ledger.
-	ledgerService.SetEntityReader(db.NewEntityRepository(database))
+	ledgerService.SetEntityReader(db.NewEntityRepository(routedDB)) // routed per workspace
 	// Recognized-revenue lookup for the write-off bad-debt split (accrual
 	// #466/#477): a write-off expenses the already-recognized portion as Bad
 	// Debt instead of reversing it from Deferred. Under the cash model (no
@@ -709,9 +800,9 @@ func main() {
 		ledgerRepo.SetAccountingVersion(domain.AccountingModelV2)
 		log.Println("Revenue recognition: ACCRUAL (schedules built at invoice issuance)")
 	}
-	mrrSnapshotRepo := db.NewMRRSnapshotRepository(database)
+	mrrSnapshotRepo := db.NewMRRSnapshotRepository(routedDB)
 	analyticsService.SetSnapshotStore(mrrSnapshotRepo)
-	analyticsService.SetEntityReader(db.NewEntityRepository(database)) // multi-entity: per-entity MRR scoping + concrete entity on snapshots
+	analyticsService.SetEntityReader(db.NewEntityRepository(routedDB)) // multi-entity: per-entity MRR scoping + concrete entity on snapshots
 	if agingStore, ok := invoiceRepo.(service.InvoiceAgingStore); ok {
 		analyticsService.SetInvoiceAgingStore(agingStore)
 	}
@@ -725,7 +816,7 @@ func main() {
 	} else {
 		log.Println("Warning: OPENAI_API_KEY not set. GenAI analytics will be unavailable.")
 	}
-	genaiService := service.NewGenAIService(llmProvider, database)
+	genaiService := service.NewGenAIService(llmProvider, routedDB)
 
 	// Advanced Billing (P15)
 	advancedBillingService := service.NewAdvancedBillingService(unbilledChargeRepo, subscriptionRepo)
@@ -799,12 +890,12 @@ func main() {
 	orgService.SetFX(fxProvider, fxFallback, reportingCurrency)
 
 	// Referral (P42)
-	referralRepo := db.NewReferralRepository(dbx)
+	referralRepo := db.NewReferralRepository(routedDBX)
 	referralService := service.NewReferralService(referralRepo, customerRepo)
 	referralHandler := handler.NewReferralHandler(referralService)
 
 	// Gift (P43)
-	giftRepo := db.NewGiftRepository(dbx)
+	giftRepo := db.NewGiftRepository(routedDBX)
 	giftService := service.NewGiftService(giftRepo, subscriptionRepo, invoiceService, planRepo, notificationService)
 	// Gift cancellation (account-credit policy) issues the buyer's credit
 	// through the normal credit-note path — approval governance + GL legs.
@@ -1007,7 +1098,7 @@ func main() {
 		scheduler.DefaultDunningConfig(),
 		baseURL,
 	)
-	dunningScheduler.SetPaymentAttempts(db.NewPaymentAttemptRepository(database))          // skip dunning for a settling ACH (Inc 3b)
+	dunningScheduler.SetPaymentAttempts(db.NewPaymentAttemptRepository(routedDB))          // skip dunning for a settling ACH (Inc 3b)
 	dunningScheduler.SetWriteOffLedger(ledgerService, invoiceRepo.(*db.InvoiceRepository)) // auto-write-off posts its ledger reversal (#466 follow-up)
 	dunningScheduler.Start()
 	defer dunningScheduler.Stop()
@@ -1041,16 +1132,16 @@ func main() {
 
 	// Prepaid wallets (Lago-parity B1): money-denominated balance drained
 	// at invoice time before credit notes and the gateway (D3).
-	walletRepo := db.NewWalletRepository(database)
-	auditLogRepo := db.NewAuditLogRepository(database) // C2: append-only audit trail
+	walletRepo := db.NewWalletRepository(routedDB)
+	auditLogRepo := db.NewAuditLogRepository(routedDB) // C2: append-only audit trail
 	walletService := service.NewWalletService(walletRepo, customerRepo, ledgerService)
-	walletService.SetEntityReader(db.NewEntityRepository(database)) // multi-entity: scope wallets to a legal entity
+	walletService.SetEntityReader(db.NewEntityRepository(routedDB)) // multi-entity: scope wallets to a legal entity
 	walletService.SetNotifier(notifier)
 	invoiceService.WalletDrainer = walletService
 
 	// Usage threshold alerts (Lago-parity B3): evaluated on the billing-
 	// cycle tick, fired once per period via webhook + email.
-	usageAlertRepo := db.NewUsageAlertRepository(database)
+	usageAlertRepo := db.NewUsageAlertRepository(routedDB)
 	usageAlertService := service.NewUsageAlertService(usageAlertRepo, subscriptionRepo, billableMetricRepo, usageRepo, customerRepo, entitlementService)
 	usageAlertService.SetNotifier(notifier)
 	usageAlertService.SetEventPublisher(webhookService) // usage.alert.triggered
@@ -1254,13 +1345,13 @@ func main() {
 	entitlementHandler := handler.NewEntitlementHandler(entitlementService) // Entitlement Engine v1
 	customerHandler := handler.NewCustomerHandler(customerService, subscriptionRepo)
 	billingHandler := handler.NewBillingHandler(tenantService)                                                                                    // Phase B: managed-cloud trial/billing status
-	stripeImportService := service.NewStripeImportService(customerService, catalogService, subscriptionRepo, db.NewImportRefRepository(database)) // migration: Stripe → Recurso
+	stripeImportService := service.NewStripeImportService(customerService, catalogService, subscriptionRepo, db.NewImportRefRepository(routedDB)) // migration: Stripe → Recurso
 	stripeImportService.SetSubscriptionReader(subscriptionRepo)                                                                                   // read side for the Compare gate
 	stripeImportHandler := handler.NewStripeImportHandler(stripeImportService)
-	chargebeeImportService := service.NewChargebeeImportService(customerService, catalogService, subscriptionRepo, db.NewImportRefRepository(database)) // migration: Chargebee → Recurso
+	chargebeeImportService := service.NewChargebeeImportService(customerService, catalogService, subscriptionRepo, db.NewImportRefRepository(routedDB)) // migration: Chargebee → Recurso
 	chargebeeImportService.SetSubscriptionReader(subscriptionRepo)                                                                                      // read side for the Compare gate
 	chargebeeImportHandler := handler.NewChargebeeImportHandler(chargebeeImportService)
-	revenuecatImportService := service.NewRevenueCatImportService(customerService, catalogService, subscriptionRepo, db.NewImportRefRepository(database)) // migration: RevenueCat → Recurso
+	revenuecatImportService := service.NewRevenueCatImportService(customerService, catalogService, subscriptionRepo, db.NewImportRefRepository(routedDB)) // migration: RevenueCat → Recurso
 	revenuecatImportService.SetSubscriptionReader(subscriptionRepo)                                                                                       // read side for the Compare gate
 	revenuecatImportHandler := handler.NewRevenueCatImportHandler(revenuecatImportService)
 	subscriptionHandler := handler.NewSubscriptionHandler(subscriptionService)
@@ -1303,6 +1394,8 @@ func main() {
 	// development so they still work over plain http://localhost.
 	secureCookie := os.Getenv("APP_ENV") != "development"
 	authHandler := handler.NewAuthHandler(authService, secureCookie)
+	// Only a caller holding this token may ask signup for a dedicated database.
+	authHandler.SetDedicatedDatabaseToken(os.Getenv("DEDICATED_DATABASES_PROVISION_TOKEN"))
 
 	// DEMO_MODE (docs/spec_demo_mode.md): bootstrap the sandbox tenant/user/
 	// key + seed data, expose /auth/demo, and reset on an interval.
@@ -1386,6 +1479,7 @@ func main() {
 	portalBaseURL := getEnvDefault("PORTAL_URL", baseURL)
 	// Every customer-facing email link — hosted checkout (Pay Now) and portal
 	// (update-payment-method) — is an SPA route on app.recurso.dev, not the API.
+	notificationService.SetWorkspaceLinker(workspaceLinker)
 	notificationService.SetAppBaseURL(getEnvDefault("DASHBOARD_URL", portalBaseURL))
 	portalService := service.NewPortalService(customerRepo, invoiceRepo, magicLinkRepo, portalSessionRepo, disputeRepo, giftService, emailSender, portalBaseURL)
 	portalAPIHandler := handler.NewPortalAPIHandler(portalService)
@@ -1434,6 +1528,14 @@ func main() {
 	quoteService.SetTxManager(txManager)        // atomic create-then-claim (non-deferrable quotes.invoice_id FK)
 	quoteHandler := handler.NewQuoteHandler(quoteService)
 
+	// Manual invoices: explicit line items, chosen issuing entity and dates.
+	// Needs the concrete invoice repo (tx-scoped insert + external_ref), exactly
+	// like the quote conversion path above.
+	manualInvoiceService := service.NewManualInvoiceService(
+		invoiceRepo.(*db.InvoiceRepository), customerRepo, db.NewEntityRepository(routedDB), txManager)
+	manualInvoiceService.SetLedgerPoster(ledgerService) // post the invoice's AR→Revenue leg
+	manualInvoiceHandler := handler.NewManualInvoiceHandler(manualInvoiceService)
+
 	// GST & PDF (P30)
 	pdfService := service.NewInvoicePDFService(
 		getEnvDefault("PDF_COMPANY_NAME", "Your Company Name"),
@@ -1458,31 +1560,31 @@ func main() {
 	// Filing GSTR for the primary entity by its concrete id must resolve the
 	// tenant/default GST config (stored under entity_id IS NULL) for the seller
 	// GSTIN — the primary lookup makes that mapping possible.
-	gstHandler.SetEntityReader(db.NewEntityRepository(database))
+	gstHandler.SetEntityReader(db.NewEntityRepository(routedDB))
 	// A GST-config write changes the seller jurisdiction — drop the resolver's
 	// per-tenant cache so the next invoice sees it immediately (#186).
 	gstHandler.SetSellerJurisdictionInvalidator(taxResolver.InvalidateSellerJurisdiction)
 	taxNexusHandler := handler.NewTaxNexusHandler(taxNexusRepo)
 	taxNexusHandler.SetStatusService(nexusStatusService)
 	einvoiceHandler := handler.NewEInvoiceHandler(einvoiceService, irpConfigRepo)
-	euConfigHandler := handler.NewEUConfigHandler(db.NewTenantEUConfigRepository(database))
-	usTaxConfigRepo := db.NewTenantUSTaxConfigRepository(database)
+	euConfigHandler := handler.NewEUConfigHandler(db.NewTenantEUConfigRepository(routedDB))
+	usTaxConfigRepo := db.NewTenantUSTaxConfigRepository(routedDB)
 	usTaxConfigHandler := handler.NewUSTaxConfigHandler(usTaxConfigRepo)
 	pdfHandler.SetUSTaxIdentity(usTaxConfigRepo) // per-tenant W-9 on US invoices
 
-	compareReportRepo := db.NewCompareReportRepository(database)
+	compareReportRepo := db.NewCompareReportRepository(routedDB)
 	compareReportHandler := handler.NewCompareReportHandler(compareReportRepo)
 	compareReportHandler.SetTenantNamer(tenantService)
 	stripeImportHandler.SetReportStore(compareReportRepo)
 	chargebeeImportHandler.SetReportStore(compareReportRepo)
 	revenuecatImportHandler.SetReportStore(compareReportRepo)
 
-	invoiceBrandingRepo := db.NewInvoiceBrandingRepository(database)
+	invoiceBrandingRepo := db.NewInvoiceBrandingRepository(routedDB)
 	invoiceBrandingHandler := handler.NewInvoiceBrandingHandler(invoiceBrandingRepo)
 	pdfHandler.SetBranding(invoiceBrandingRepo)        // per-tenant logo/signature/bank/terms on invoices
 	creditNoteHandler.SetBranding(invoiceBrandingRepo) // same letterhead on credit notes
 	euEInvoiceHandler := handler.NewEUEInvoiceHandler(euInvoiceRepo, invoiceRepo, customerRepo, euEInvoiceService)
-	mcpSettingsHandler := handler.NewMCPSettingsHandler(db.NewMCPSettingsRepository(database))
+	mcpSettingsHandler := handler.NewMCPSettingsHandler(db.NewMCPSettingsRepository(routedDB))
 	// Manual CRM sync ("test my HubSpot connection"). Typed-nil trap: only hand
 	// the worker to the handler when it actually exists.
 	var crmSyncHandler *handler.CRMSyncHandler
@@ -1491,14 +1593,14 @@ func main() {
 	} else {
 		crmSyncHandler = handler.NewCRMSyncHandler(nil)
 	}
-	entityService := service.NewEntityService(db.NewEntityRepository(database))
+	entityService := service.NewEntityService(db.NewEntityRepository(routedDB)) // routed per workspace
 	// The primary entity's country is the seller jurisdiction for non-GST
 	// tenants — an entity update must drop the resolver's cache too (#186).
 	entityService.SetSellerJurisdictionInvalidator(taxResolver.InvalidateSellerJurisdiction)
 	entityHandler := handler.NewEntityHandler(entityService)
 
 	// Consent Service & Handler (P30 - RBI compliance)
-	consentRepo := db.NewConsentRepository(database)
+	consentRepo := db.NewConsentRepository(routedDB)
 	consentService := service.NewConsentService(consentRepo)
 	consentHandler := handler.NewConsentHandler(consentService)
 
@@ -1517,7 +1619,7 @@ func main() {
 	dunningRecoveryService.SetCollectionsAggregator(invoiceRepo)
 	collectionsActionService := service.NewCollectionsActionService(invoiceRepo)
 	collectionsActionService.SetWriteOffLedger(ledgerService, invoiceRepo) // write-off posts its ledger reversal (#466 follow-up)
-	collectionsActionService.SetInFlightChecker(db.NewPaymentAttemptRepository(database))
+	collectionsActionService.SetInFlightChecker(db.NewPaymentAttemptRepository(routedDB))
 	collectionsHandler := handler.NewCollectionsHandler(invoiceRepo, dunningRecoveryService, collectionsActionService)
 
 	// Phase 2: New Handlers
@@ -1525,7 +1627,7 @@ func main() {
 	offlinePaymentHandler := handler.NewOfflinePaymentHandler(offlinePaymentService)
 	orgHandler := handler.NewOrganizationHandler(orgService)
 	accountingHandler := handler.NewAccountingHandler(acctConnRepo, accountingService, oauthStateSecret, dashboardURL)
-	churnHandler := handler.NewChurnHandler(churnService, database)
+	churnHandler := handler.NewChurnHandler(churnService, routedDB)
 
 	// Payment Handlers
 	paymentHandler := handler.NewPaymentHandler(tenantGateway, invoiceRepo)
@@ -1534,9 +1636,9 @@ func main() {
 	webhookHandler.SetOfflinePaymentService(offlinePaymentService)
 	webhookHandler.SetDunningCampaignService(dunningCampaignService)
 	webhookHandler.SetCreditNoteService(creditNoteService)                          // consume gateway refund events (refund.processed/failed, charge.refunded)
-	webhookHandler.SetInboundWebhookDedup(db.NewInboundWebhookRepository(database)) // skip redelivered gateway webhooks (ENG-162)
+	webhookHandler.SetInboundWebhookDedup(db.NewInboundWebhookRepository(routedDB)) // skip redelivered gateway webhooks (ENG-162)
 	webhookHandler.SetGatewayConnections(gatewayConnService)                        // BYO increment 3: per-connection webhook secrets
-	webhookHandler.SetPaymentAttempts(db.NewPaymentAttemptRepository(database))     // ACH async settlement (Inc 3b)
+	webhookHandler.SetPaymentAttempts(db.NewPaymentAttemptRepository(routedDB))     // ACH async settlement (Inc 3b)
 
 	// Revenue Recognition Handler
 	revrecHandler := handler.NewRevRecHandler(revrecService)
@@ -1778,6 +1880,7 @@ func main() {
 		offlinePaymentHandler:   offlinePaymentHandler,
 		orgHandler:              orgHandler,
 		pdfHandler:              pdfHandler,
+		manualInvoiceHandler:    manualInvoiceHandler,
 		quoteHandler:            quoteHandler,
 		rdb:                     rdb,
 		reconciliationHandler:   reconciliationHandler,

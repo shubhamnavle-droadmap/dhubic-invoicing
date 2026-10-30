@@ -7,6 +7,7 @@ import (
 
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // EUEInvoiceRetryWorker redrives delivery of EU e-invoice documents that failed
@@ -70,7 +71,7 @@ func (w *EUEInvoiceRetryWorker) Start(ctx context.Context) {
 			slog.Info("eu e-invoice retry worker stopping")
 			return
 		case <-ticker.C:
-			w.processRetries(ctx)
+			workspace.Each(ctx, w.processRetries)
 		}
 	}
 }

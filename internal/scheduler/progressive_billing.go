@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // ProgressiveBillingScheduler auto-triggers interim (progressive) billing (A5).
@@ -101,7 +102,7 @@ func (s *ProgressiveBillingScheduler) run() {
 
 	// Efficiency guard only — the watermark CAS is what actually prevents
 	// double-billing, so a missed lock is harmless (at worst a redundant scan).
-	release, acquired, err := s.locker.Obtain(ctx, "scheduler:progressive-billing", 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, "scheduler:progressive-billing", workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("progressive sweep: failed to obtain lock", "error", err)
 		return
@@ -115,26 +116,28 @@ func (s *ProgressiveBillingScheduler) run() {
 		}
 	}()
 
-	ids, err := s.repo.ListActiveProgressiveSubscriptionIDs(ctx)
-	if err != nil {
-		slog.Error("progressive sweep: failed to list subscriptions", "error", err)
-		return
-	}
-	if len(ids) == 0 {
-		return
-	}
-
-	var billed int
-	for _, id := range ids {
-		inv, err := s.biller.GenerateProgressiveInvoiceForSub(ctx, id)
+	workspace.Each(ctx, func(ctx context.Context) {
+		ids, err := s.repo.ListActiveProgressiveSubscriptionIDs(ctx)
 		if err != nil {
-			slog.Error("progressive sweep: interim billing failed", "subscription_id", id, "error", err)
-			continue
+			slog.Error("progressive sweep: failed to list subscriptions", "error", err)
+			return
 		}
-		if inv != nil {
-			billed++
-			slog.Info("progressive sweep: interim invoice generated", "subscription_id", id, "invoice_id", inv.ID, "amount_due", inv.AmountDue)
+		if len(ids) == 0 {
+			return
 		}
-	}
-	slog.Info("progressive sweep complete", "candidates", len(ids), "billed", billed)
+
+		var billed int
+		for _, id := range ids {
+			inv, err := s.biller.GenerateProgressiveInvoiceForSub(ctx, id)
+			if err != nil {
+				slog.Error("progressive sweep: interim billing failed", "subscription_id", id, "error", err)
+				continue
+			}
+			if inv != nil {
+				billed++
+				slog.Info("progressive sweep: interim invoice generated", "subscription_id", id, "invoice_id", inv.ID, "amount_due", inv.AmountDue)
+			}
+		}
+		slog.Info("progressive sweep complete", "candidates", len(ids), "billed", billed)
+	})
 }

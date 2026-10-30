@@ -26,6 +26,9 @@ const PortalLogin = () => {
   // Support prefilled links from the admin dashboard: /portal/login?email=…
   const [searchParams] = useSearchParams();
   const [email, setEmail] = useState(searchParams.get("email") || "");
+  // Workspaces with a dedicated database link here with ?w=<workspace>; the API
+  // needs it to find the customer. Absent for every other workspace.
+  const workspace = searchParams.get("w");
   const [loading, setLoading] = useState(false);
   const [success, setSuccess] = useState(false);
   const [devLink, setDevLink] = useState(null);
@@ -38,11 +41,14 @@ const PortalLogin = () => {
     setError(null);
 
     try {
-      const response = await fetch(`${API_BASE}/portal/auth/request`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ email }),
-      });
+      const response = await fetch(
+        `${API_BASE}/portal/auth/request${workspace ? `?w=${encodeURIComponent(workspace)}` : ""}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email }),
+        }
+      );
 
       const data = await response.json();
 

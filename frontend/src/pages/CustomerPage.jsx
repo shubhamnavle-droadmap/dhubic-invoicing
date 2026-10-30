@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link2, Pencil } from "lucide-react";
 
 import { endpoints } from "../lib/api";
+import { portalLoginUrl } from "../lib/portalLink";
 import { useObjectQuery } from "@/lib/useObjectQuery";
 import { toast } from "@/components/ui/sonner";
 import { usePlans } from "../lib/useCustomers";
@@ -117,11 +118,18 @@ export default function CustomerPage() {
   const planName = (planId) =>
     planList.find((p) => p.id === planId)?.name || planId?.slice(0, 8);
 
+  // Same cache entry as Settings/Profile. Tells us whether this workspace has a
+  // dedicated database, which changes the portal login link.
+  const { data: account } = useQuery({
+    queryKey: ["account"],
+    queryFn: async () => (await endpoints.getAccount()).data.data || null,
+  });
+
   const copyPortalLink = useCallback(() => {
-    const url = `${window.location.origin}/portal/login?email=${encodeURIComponent(customer?.email || "")}`;
+    const url = portalLoginUrl(customer?.email, account);
     navigator.clipboard.writeText(url);
     toast.success("Portal link copied");
-  }, [customer?.email]);
+  }, [customer?.email, account]);
 
   const handleChanged = (updated) => {
     if (updated?.id) {

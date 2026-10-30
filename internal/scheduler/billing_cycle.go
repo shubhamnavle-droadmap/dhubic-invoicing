@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/recurso-dev/recurso/internal/core/port"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // BillingCycleScheduler drives unattended subscription renewal
@@ -108,7 +109,7 @@ func (s *BillingCycleScheduler) Stop() {
 func (s *BillingCycleScheduler) runRenewals() {
 	ctx := context.Background()
 
-	release, acquired, err := s.locker.Obtain(ctx, "scheduler:billing-cycle", 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, "scheduler:billing-cycle", workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for billing cycle scheduler", "error", err)
 		return
@@ -122,48 +123,50 @@ func (s *BillingCycleScheduler) runRenewals() {
 		}
 	}()
 
-	renewed, err := s.renewals.ProcessDueRenewals(ctx)
-	if err != nil {
-		slog.Error("billing cycle sweep failed", "error", err)
-		return
-	}
-	if renewed > 0 {
-		slog.Info("billing cycle sweep complete", "renewed", renewed)
-	}
+	workspace.Each(ctx, func(ctx context.Context) {
+		renewed, err := s.renewals.ProcessDueRenewals(ctx)
+		if err != nil {
+			slog.Error("billing cycle sweep failed", "error", err)
+			return
+		}
+		if renewed > 0 {
+			slog.Info("billing cycle sweep complete", "renewed", renewed)
+		}
 
-	// Wallet maintenance rides the same tick: write off expired promotional
-	// credit BEFORE evaluating recharges, so a wallet whose balance was
-	// mostly expired credit tops up in the same sweep.
-	if s.wallets != nil {
-		if expired, err := s.wallets.ExpireOverdueCredits(ctx); err != nil {
-			slog.Error("wallet expiry sweep failed", "error", err)
-		} else if expired > 0 {
-			slog.Info("expired wallet credit written off", "wallets", expired)
+		// Wallet maintenance rides the same tick: write off expired promotional
+		// credit BEFORE evaluating recharges, so a wallet whose balance was
+		// mostly expired credit tops up in the same sweep.
+		if s.wallets != nil {
+			if expired, err := s.wallets.ExpireOverdueCredits(ctx); err != nil {
+				slog.Error("wallet expiry sweep failed", "error", err)
+			} else if expired > 0 {
+				slog.Info("expired wallet credit written off", "wallets", expired)
+			}
+			if recharged, err := s.wallets.ProcessAutoRecharges(ctx); err != nil {
+				slog.Error("wallet auto-recharge sweep failed", "error", err)
+			} else if recharged > 0 {
+				slog.Info("wallets auto-recharged", "count", recharged)
+			}
 		}
-		if recharged, err := s.wallets.ProcessAutoRecharges(ctx); err != nil {
-			slog.Error("wallet auto-recharge sweep failed", "error", err)
-		} else if recharged > 0 {
-			slog.Info("wallets auto-recharged", "count", recharged)
-		}
-	}
 
-	// Account-credit expiry rides the same tick: write off dated adjustment
-	// credits whose expiry has passed (ledger-backed credits inc 2).
-	if s.credits != nil {
-		if expired, err := s.credits.ExpireDueCredits(ctx); err != nil {
-			slog.Error("credit expiry sweep failed", "error", err)
-		} else if expired > 0 {
-			slog.Info("expired account credit written off", "credits", expired)
+		// Account-credit expiry rides the same tick: write off dated adjustment
+		// credits whose expiry has passed (ledger-backed credits inc 2).
+		if s.credits != nil {
+			if expired, err := s.credits.ExpireDueCredits(ctx); err != nil {
+				slog.Error("credit expiry sweep failed", "error", err)
+			} else if expired > 0 {
+				slog.Info("expired account credit written off", "credits", expired)
+			}
 		}
-	}
 
-	// Usage threshold alerts (B3): evaluated on the same tick; the
-	// per-period MarkFired claim keeps concurrent sweeps to one firing.
-	if s.alerts != nil {
-		if fired, err := s.alerts.EvaluateAlerts(ctx); err != nil {
-			slog.Error("usage alert sweep failed", "error", err)
-		} else if fired > 0 {
-			slog.Info("usage alerts fired", "count", fired)
+		// Usage threshold alerts (B3): evaluated on the same tick; the
+		// per-period MarkFired claim keeps concurrent sweeps to one firing.
+		if s.alerts != nil {
+			if fired, err := s.alerts.EvaluateAlerts(ctx); err != nil {
+				slog.Error("usage alert sweep failed", "error", err)
+			} else if fired > 0 {
+				slog.Info("usage alerts fired", "count", fired)
+			}
 		}
-	}
+	})
 }

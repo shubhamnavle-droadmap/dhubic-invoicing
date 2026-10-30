@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // resumeClaimWindow is how far ClaimDueForResume pushes resume_at when it claims
@@ -94,7 +95,7 @@ func (s *SubscriptionResumeScheduler) runResumes() {
 	ctx := context.Background()
 
 	lockKey := "scheduler:subscription-resume"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for subscription resume scheduler", "error", err)
 		return
@@ -108,30 +109,32 @@ func (s *SubscriptionResumeScheduler) runResumes() {
 		}
 	}()
 
-	// Atomically CLAIM due paused subscriptions: the lock above is a no-op
-	// without Redis, so the claim is what guarantees each is resumed by exactly
-	// one runner (ADR-003).
-	subs, err := s.claimer.ClaimDueForResume(ctx, resumeClaimWindow, resumeBatchLimit)
-	if err != nil {
-		slog.Error("failed to claim subscriptions due for resume", "error", err)
-		return
-	}
-	if len(subs) == 0 {
-		return
-	}
-
-	slog.Info("subscriptions due for auto-resume", "count", len(subs))
-
-	for _, sub := range subs {
-		// ResumeSubscription reads through the tenant-scoped repository, so inject
-		// the subscription's own tenant (the scheduler ctx carries none). It sets
-		// the status active and clears resume_at, so a resumed row is not
-		// re-claimed on the next tick.
-		tenantCtx := context.WithValue(ctx, domain.TenantIDKey, sub.TenantID)
-		if _, err := s.resumer.ResumeSubscription(tenantCtx, sub.TenantID, sub.ID); err != nil {
-			slog.Error("failed to auto-resume subscription", "subscription_id", sub.ID, "error", err)
-			continue
+	workspace.Each(ctx, func(ctx context.Context) {
+		// Atomically CLAIM due paused subscriptions: the lock above is a no-op
+		// without Redis, so the claim is what guarantees each is resumed by exactly
+		// one runner (ADR-003).
+		subs, err := s.claimer.ClaimDueForResume(ctx, resumeClaimWindow, resumeBatchLimit)
+		if err != nil {
+			slog.Error("failed to claim subscriptions due for resume", "error", err)
+			return
 		}
-		slog.Info("auto-resumed subscription", "subscription_id", sub.ID)
-	}
+		if len(subs) == 0 {
+			return
+		}
+
+		slog.Info("subscriptions due for auto-resume", "count", len(subs))
+
+		for _, sub := range subs {
+			// ResumeSubscription reads through the tenant-scoped repository, so inject
+			// the subscription's own tenant (the scheduler ctx carries none). It sets
+			// the status active and clears resume_at, so a resumed row is not
+			// re-claimed on the next tick.
+			tenantCtx := context.WithValue(ctx, domain.TenantIDKey, sub.TenantID)
+			if _, err := s.resumer.ResumeSubscription(tenantCtx, sub.TenantID, sub.ID); err != nil {
+				slog.Error("failed to auto-resume subscription", "subscription_id", sub.ID, "error", err)
+				continue
+			}
+			slog.Info("auto-resumed subscription", "subscription_id", sub.ID)
+		}
+	})
 }

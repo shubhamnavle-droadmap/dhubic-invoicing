@@ -1,10 +1,12 @@
 package middleware
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 	"github.com/recurso-dev/recurso/internal/adapter/httperr"
+	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/service"
 )
 
@@ -20,6 +22,12 @@ func PortalAuthMiddleware(portalService *service.PortalService) gin.HandlerFunc 
 		if token == "" {
 			httperr.Abort(c, http.StatusUnauthorized, httperr.CodeUnauthorized, "unauthorized")
 			return
+		}
+
+		// A dedicated-database workspace's session token names the workspace, so
+		// the lookup (and everything after it) goes to that workspace's database.
+		if tenantID, ok := service.TenantFromSessionToken(token); ok {
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), domain.TenantIDKey, tenantID))
 		}
 
 		session, err := portalService.ValidateSession(c.Request.Context(), token)

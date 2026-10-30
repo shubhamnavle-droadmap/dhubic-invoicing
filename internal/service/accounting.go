@@ -419,7 +419,7 @@ func (s *AccountingService) TriggerSyncAsync(tenantID uuid.UUID, provider string
 		// Detached from the HTTP request: the client navigating away must not
 		// cancel a half-done books push. Bounded so a wedged provider cannot
 		// hold the single-flight slot forever.
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+		ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), domain.TenantIDKey, tenantID), 15*time.Minute)
 		defer cancel()
 		if err := s.syncForTenant(ctx, tenantID, force, provider); err != nil {
 			slog.ErrorContext(ctx, "manual accounting sync failed", "tenant_id", tenantID, "provider", provider, "error", err)
@@ -540,7 +540,7 @@ func (s *AccountingService) syncForTenant(ctx context.Context, tenantID uuid.UUI
 // sweep left the row "syncing" forever, which read as an eternal in-flight
 // sync on the dashboard.
 func (s *AccountingService) finishSyncLeg(conn *domain.AccountingConnection, tenantID uuid.UUID, force bool, synced, skipped int, legErr error) {
-	wctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	wctx, cancel := context.WithTimeout(context.WithValue(context.Background(), domain.TenantIDKey, tenantID), 10*time.Second)
 	defer cancel()
 
 	now := time.Now()

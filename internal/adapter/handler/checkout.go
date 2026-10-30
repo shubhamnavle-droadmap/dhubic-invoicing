@@ -175,7 +175,7 @@ func (h *CheckoutHandler) ShowCheckout(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, codeInternalError, "failed to fetch invoice")
 		return
 	}
-	if invoice == nil {
+	if invoice == nil || workspaceMismatch(c.Request.Context(), invoice.TenantID) {
 		respondError(c, http.StatusNotFound, codeNotFound, "invoice not found")
 		return
 	}
@@ -209,7 +209,7 @@ func (h *CheckoutHandler) InitiatePayment(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, codeInternalError, "failed to fetch invoice")
 		return
 	}
-	if invoice == nil {
+	if invoice == nil || workspaceMismatch(c.Request.Context(), invoice.TenantID) {
 		respondError(c, http.StatusNotFound, codeNotFound, "invoice not found")
 		return
 	}
@@ -317,7 +317,7 @@ func (h *CheckoutHandler) CheckoutSuccess(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, codeInternalError, "failed to fetch invoice")
 		return
 	}
-	if invoice == nil {
+	if invoice == nil || workspaceMismatch(c.Request.Context(), invoice.TenantID) {
 		respondError(c, http.StatusNotFound, codeNotFound, "invoice not found")
 		return
 	}
@@ -427,7 +427,7 @@ func (h *CheckoutHandler) RazorpayVerify(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, codeInternalError, "failed to fetch invoice")
 		return
 	}
-	if invoice == nil {
+	if invoice == nil || workspaceMismatch(c.Request.Context(), invoice.TenantID) {
 		respondError(c, http.StatusNotFound, codeNotFound, "invoice not found")
 		return
 	}

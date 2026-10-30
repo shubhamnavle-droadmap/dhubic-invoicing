@@ -14,6 +14,18 @@ import { API_ROOT as API_BASE } from "../lib/api";
 import { formatCurrency } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 
+// Links for workspaces with a dedicated database carry ?w=<workspace id>. The
+// API cannot tell which database holds an invoice from its id alone, so every
+// call on this page forwards the marker; without it nothing changes.
+const workspaceId = () => new URLSearchParams(window.location.search).get("w");
+const withWorkspace = (url) => {
+  const w = workspaceId();
+  if (!w) return url;
+  return `${url}${url.includes("?") ? "&" : "?"}w=${encodeURIComponent(w)}`;
+};
+const ownPath = () =>
+  withWorkspace(window.location.pathname);
+
 // PaymentForm renders the Stripe Payment Element and confirms the intent. It
 // must live inside <Elements>. On a card success it settles inline; methods
 // that need a bank redirect come back to this page's return_url, where the
@@ -29,7 +41,9 @@ function PaymentForm({ invoice, onPaid, onProcessing }) {
   // that its metadata invoice_id matches this invoice before marking paid).
   const settle = async (paymentIntentId) => {
     const res = await fetch(
-      `${API_BASE}/checkout/${id}/success?payment_intent=${encodeURIComponent(paymentIntentId)}`
+      withWorkspace(
+        `${API_BASE}/checkout/${id}/success?payment_intent=${encodeURIComponent(paymentIntentId)}`
+      )
     );
     const data = await res.json().catch(() => ({}));
     if (res.ok && data.data?.status === "paid") {
@@ -53,7 +67,7 @@ function PaymentForm({ invoice, onPaid, onProcessing }) {
     const { error: confirmError, paymentIntent } = await stripe.confirmPayment({
       elements,
       confirmParams: {
-        return_url: `${window.location.origin}${window.location.pathname}`,
+        return_url: `${window.location.origin}${ownPath()}`,
       },
       redirect: "if_required",
     });
@@ -118,7 +132,7 @@ export default function Checkout() {
 
   // Load the invoice for display + paid check.
   useEffect(() => {
-    fetch(`${API_BASE}/checkout/${id}`)
+    fetch(withWorkspace(`${API_BASE}/checkout/${id}`))
       .then((res) => {
         if (!res.ok) throw new Error("Invoice not found");
         return res.json();
@@ -138,7 +152,9 @@ export default function Checkout() {
     const pi = new URLSearchParams(window.location.search).get("payment_intent");
     if (!pi) return;
     fetch(
-      `${API_BASE}/checkout/${id}/success?payment_intent=${encodeURIComponent(pi)}`
+      withWorkspace(
+        `${API_BASE}/checkout/${id}/success?payment_intent=${encodeURIComponent(pi)}`
+      )
     )
       .then((res) => res.json())
       .then((data) => {
@@ -151,7 +167,7 @@ export default function Checkout() {
 
   // Clear the redirect params and payment session for a fresh attempt.
   const handleRetryPayment = () => {
-    window.history.replaceState(null, "", window.location.pathname);
+    window.history.replaceState(null, "", ownPath());
     setGateway(null);
     setClientSecret(null);
     setPublishableKey(null);
@@ -194,7 +210,7 @@ export default function Checkout() {
       theme: { color: "#10b981" },
       handler: async (resp) => {
         // Verify server-side (signature + order↔invoice bind) then settle.
-        const vres = await fetch(`${API_BASE}/checkout/${id}/razorpay/verify`, {
+        const vres = await fetch(withWorkspace(`${API_BASE}/checkout/${id}/razorpay/verify`), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -224,7 +240,7 @@ export default function Checkout() {
     setInitiating(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/checkout/${id}/pay`, {
+      const res = await fetch(withWorkspace(`${API_BASE}/checkout/${id}/pay`), {
         method: "POST",
       });
       const data = await res.json();

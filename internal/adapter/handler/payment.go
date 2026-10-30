@@ -43,7 +43,7 @@ func (h *PaymentHandler) CreateOrder(c *gin.Context) {
 		respondError(c, http.StatusInternalServerError, codeInternalError, "Database error")
 		return
 	}
-	if invoice == nil {
+	if invoice == nil || workspaceMismatch(c.Request.Context(), invoice.TenantID) {
 		respondError(c, http.StatusNotFound, codeNotFound, "Invoice not found")
 		return
 	}

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"html"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,34 @@ func NewPortalService(
 	}
 }
 
+// Sessions of a workspace with a dedicated database carry the workspace in the
+// token itself ("<tenant-uuid>.<random>"), because the session cookie is the only
+// thing the portal sends back and the session row lives in that workspace's
+// database. The random part is what is looked up and compared, so the prefix adds
+// nothing an attacker can guess; it only says where to look.
+const sessionTokenSep = "."
+
+func workspaceSessionToken(ctx context.Context, token string) string {
+	if id, _ := ctx.Value(domain.TenantIDKey).(uuid.UUID); id != uuid.Nil {
+		return id.String() + sessionTokenSep + token
+	}
+	return token
+}
+
+// TenantFromSessionToken returns the workspace a portal session token names.
+// It is false for ordinary (shared-database) tokens, which have no prefix.
+func TenantFromSessionToken(token string) (uuid.UUID, bool) {
+	prefix, _, found := strings.Cut(token, sessionTokenSep)
+	if !found {
+		return uuid.Nil, false
+	}
+	id, err := uuid.Parse(prefix)
+	if err != nil || id == uuid.Nil {
+		return uuid.Nil, false
+	}
+	return id, true
+}
+
 // RequestMagicLink creates a magic link for customer login and emails it.
 func (s *PortalService) RequestMagicLink(ctx context.Context, email string) (*domain.MagicLink, error) {
 	// Portal login happens before any tenant is known, so this lookup is
@@ -75,6 +104,9 @@ func (s *PortalService) RequestMagicLink(ctx context.Context, email string) (*do
 
 	if s.emailSender != nil {
 		loginURL := fmt.Sprintf("%s/portal/verify?token=%s", s.portalBaseURL, link.Token)
+		if id, _ := ctx.Value(domain.TenantIDKey).(uuid.UUID); id != uuid.Nil {
+			loginURL += "&w=" + id.String() // the verify page needs the workspace to find the link
+		}
 		msg := port.EmailMessage{
 			To:      customer.Email,
 			ToName:  domain.PtrToString(customer.Name),
@@ -125,7 +157,7 @@ func (s *PortalService) VerifyMagicLink(ctx context.Context, token string) (*dom
 	session := &domain.PortalSession{
 		ID:         uuid.New(),
 		CustomerID: link.CustomerID,
-		Token:      db.GenerateSecureToken(),
+		Token:      workspaceSessionToken(ctx, db.GenerateSecureToken()),
 		ExpiresAt:  time.Now().Add(db.PortalSessionExpiry),
 	}
 

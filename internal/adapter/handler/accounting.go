@@ -223,6 +223,10 @@ func (h *AccountingHandler) OAuthCallback(c *gin.Context) {
 		return
 	}
 
+	// The callback is a bare browser redirect with no session, so name the tenant
+	// from the verified state; the connection is stored in that tenant's database.
+	c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), domain.TenantIDKey, tenantID))
+
 	baseURL := os.Getenv("APP_BASE_URL")
 	if baseURL == "" {
 		baseURL = "http://localhost:8080"

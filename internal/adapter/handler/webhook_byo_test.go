@@ -106,3 +106,50 @@ func TestPerConnectionWebhook_ResolvedSecretReachesVerification(t *testing.T) {
 		t.Fatalf("resolved secret: got %d want 401 (reached signature verification)", got)
 	}
 }
+
+// The connection's tenant must reach the request context as the routing tenant,
+// so the invoice lookups that follow (keyed by the payload's id alone) go to that
+// workspace's database. A legacy route (no :connID) must not set one.
+func TestPerConnectionWebhook_SetsRoutingTenant(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	id, tenant := uuid.New(), uuid.New()
+	h := &WebhookHandler{logger: slog.Default(), gatewayConns: &fakeConnResolver{
+		conns:  map[uuid.UUID]*domain.GatewayConnection{id: {ID: id, TenantID: tenant, Provider: domain.GatewayStripe, Active: true}},
+		secret: "whsec_realish",
+	}}
+
+	newCtx := func(connID string) *gin.Context {
+		c, _ := gin.CreateTestContext(httptest.NewRecorder())
+		c.Request = httptest.NewRequest(http.MethodPost, "/webhooks/stripe", nil)
+		if connID != "" {
+			c.Params = gin.Params{{Key: "connID", Value: connID}}
+		}
+		return c
+	}
+
+	c := newCtx(id.String())
+	if _, ok := h.webhookSecretFor(c, domain.GatewayStripe, "env"); !ok {
+		t.Fatal("webhookSecretFor failed")
+	}
+	if got, _ := c.Request.Context().Value(domain.TenantIDKey).(uuid.UUID); got != tenant {
+		t.Errorf("routing tenant = %v, want %v", got, tenant)
+	}
+
+	legacy := newCtx("")
+	if _, ok := h.webhookSecretFor(legacy, domain.GatewayStripe, "env"); !ok {
+		t.Fatal("legacy route failed")
+	}
+	if got, _ := legacy.Request.Context().Value(domain.TenantIDKey).(uuid.UUID); got != uuid.Nil {
+		t.Errorf("legacy route must not set a routing tenant, got %v", got)
+	}
+}
+
+func TestUnscopedWebhookHint(t *testing.T) {
+	if unscopedWebhookHint(context.Background()) == "" {
+		t.Error("the legacy (no :connID) route must explain where dedicated workspaces send webhooks")
+	}
+	scoped := context.WithValue(context.Background(), webhookConnTenantKey, uuid.New())
+	if got := unscopedWebhookHint(scoped); got != "" {
+		t.Errorf("per-connection route must not carry the hint, got %q", got)
+	}
+}

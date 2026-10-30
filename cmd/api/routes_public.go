@@ -13,6 +13,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/adapter/handler"
 	"github.com/recurso-dev/recurso/internal/adapter/httperr"
 	"github.com/recurso-dev/recurso/internal/adapter/metrics"
+	"github.com/recurso-dev/recurso/internal/adapter/middleware"
 	"github.com/recurso-dev/recurso/internal/service"
 	"github.com/redis/go-redis/v9"
 )
@@ -154,11 +155,11 @@ func registerPublicRoutes(r *gin.Engine, h *publicHandlers) {
 		log.Fatalf("Failed to register OpenAPI routes: %v", err)
 	}
 
-	r.GET("/checkout/:id", h.publicLimit, h.checkoutHandler.ShowCheckout)
-	r.POST("/checkout/:id/pay", h.publicLimit, h.checkoutHandler.InitiatePayment)
-	r.GET("/checkout/:id/success", h.publicLimit, h.checkoutHandler.CheckoutSuccess)
-	r.POST("/checkout/:id/razorpay/verify", h.publicLimit, h.checkoutHandler.RazorpayVerify)
-	r.POST("/payments/order", h.publicLimit, h.paymentHandler.CreateOrder)
+	r.GET("/checkout/:id", h.publicLimit, middleware.WorkspaceFromQuery(), h.checkoutHandler.ShowCheckout)
+	r.POST("/checkout/:id/pay", h.publicLimit, middleware.WorkspaceFromQuery(), h.checkoutHandler.InitiatePayment)
+	r.GET("/checkout/:id/success", h.publicLimit, middleware.WorkspaceFromQuery(), h.checkoutHandler.CheckoutSuccess)
+	r.POST("/checkout/:id/razorpay/verify", h.publicLimit, middleware.WorkspaceFromQuery(), h.checkoutHandler.RazorpayVerify)
+	r.POST("/payments/order", h.publicLimit, middleware.WorkspaceFromQuery(), h.paymentHandler.CreateOrder)
 	// Recurso Cloud waitlist (ENG-12): public demand capture from the website.
 	r.POST("/waitlist", h.publicLimit, h.waitlistHandler.Join)
 	r.POST("/webhooks/razorpay", h.webhookHandler.HandleRazorpay) // Webhooks need higher limits

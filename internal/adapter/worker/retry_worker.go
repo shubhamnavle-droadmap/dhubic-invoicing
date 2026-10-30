@@ -10,6 +10,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // RecoveryRecorder records recovered-revenue attribution when a retried
@@ -155,7 +156,7 @@ func (w *RetryWorker) Start(ctx context.Context) {
 			slog.Info("retry worker stopping")
 			return
 		case <-ticker.C:
-			w.processRetries(ctx)
+			workspace.Each(ctx, w.processRetries)
 		}
 	}
 }

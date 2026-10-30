@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"crypto/subtle"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -17,6 +18,28 @@ import (
 type AuthHandler struct {
 	auth   *service.AuthService
 	secure bool // Secure cookie attribute (true unless APP_ENV=development)
+
+	// dedicatedDBToken guards the signup field that creates a database: sign-up
+	// is public, and a database is far costlier than a row, so only a caller
+	// that presents this token may ask for one. Empty means nobody may.
+	dedicatedDBToken string
+}
+
+// SetDedicatedDatabaseToken sets the shared secret a caller must send in the
+// X-Provisioning-Token header to use dedicated_database_id at signup. Left
+// unset, any signup that asks for a dedicated database is refused.
+func (h *AuthHandler) SetDedicatedDatabaseToken(token string) {
+	h.dedicatedDBToken = strings.TrimSpace(token)
+}
+
+// mayProvisionDatabase reports whether this request is allowed to create a
+// dedicated database. Constant-time compare; fails closed when no token is set.
+func (h *AuthHandler) mayProvisionDatabase(c *gin.Context) bool {
+	if h.dedicatedDBToken == "" {
+		return false
+	}
+	got := strings.TrimSpace(c.GetHeader("X-Provisioning-Token"))
+	return subtle.ConstantTimeCompare([]byte(got), []byte(h.dedicatedDBToken)) == 1
 }
 
 // NewAuthHandler builds the handler. secureCookie should be false only in
@@ -77,6 +100,9 @@ type authRegisterRequest struct {
 	// primary entity's country — the seller tax jurisdiction — so a US signup
 	// is a US seller (sales tax, no GST) from its first invoice.
 	Country string `json:"country"`
+	// DedicatedDatabaseID (optional) gives the workspace its own database named
+	// recurso_<id>. Rejected unless the deployment enables the feature.
+	DedicatedDatabaseID string `json:"dedicated_database_id"`
 }
 
 func (h *AuthHandler) Register(c *gin.Context) {
@@ -91,13 +117,28 @@ func (h *AuthHandler) Register(c *gin.Context) {
 		return
 	}
 
-	res, err := h.auth.Register(c.Request.Context(), req.CompanyName, req.Name, req.Email, req.Password, c.GetHeader("User-Agent"), req.Country)
+	// Creating a database is a privileged act on a public endpoint: checked
+	// before anything else so an unauthorised caller learns nothing about how
+	// the deployment is configured.
+	req.DedicatedDatabaseID = strings.TrimSpace(req.DedicatedDatabaseID)
+	if req.DedicatedDatabaseID != "" && !h.mayProvisionDatabase(c) {
+		respondError(c, http.StatusForbidden, codeForbidden, "dedicated_database_id requires a valid X-Provisioning-Token")
+		return
+	}
+
+	res, err := h.auth.RegisterWithDatabase(c.Request.Context(), req.CompanyName, req.Name, req.Email, req.Password, c.GetHeader("User-Agent"), req.Country, req.DedicatedDatabaseID)
 	if err != nil {
 		switch {
 		case errors.Is(err, domain.ErrDuplicateEmail):
 			respondError(c, http.StatusConflict, codeConflict, err.Error())
 		case errors.Is(err, domain.ErrWeakPassword):
 			respondError(c, http.StatusBadRequest, codeValidationFailed, err.Error())
+		case errors.Is(err, service.ErrInvalidDatabaseID), errors.Is(err, service.ErrDedicatedDatabaseDisabled):
+			respondError(c, http.StatusBadRequest, codeValidationFailed, err.Error())
+		case errors.Is(err, service.ErrDatabaseExists):
+			respondError(c, http.StatusConflict, codeConflict, err.Error())
+		case errors.Is(err, service.ErrDedicatedDatabaseLimit):
+			respondError(c, http.StatusTooManyRequests, codeRateLimited, err.Error())
 		default:
 			respondInternalError(c, err)
 		}

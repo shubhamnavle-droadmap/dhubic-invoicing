@@ -191,6 +191,9 @@ func (h *PortalAPIHandler) RequestMagicLink(c *gin.Context) {
 	// token must travel exclusively via email.
 	if os.Getenv("APP_ENV") == "development" {
 		resp["_dev_link"] = "/portal/verify?token=" + link.Token
+		if id, _ := c.Request.Context().Value(domain.TenantIDKey).(uuid.UUID); id != uuid.Nil {
+			resp["_dev_link"] = resp["_dev_link"].(string) + "&w=" + id.String()
+		}
 	}
 	c.JSON(http.StatusOK, resp)
 }

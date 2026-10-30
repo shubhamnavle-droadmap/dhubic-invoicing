@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 type RevRecWorker struct {
@@ -31,7 +32,7 @@ func (w *RevRecWorker) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.RunRecognition(ctx)
+			workspace.Each(ctx, w.RunRecognition)
 		}
 	}
 }

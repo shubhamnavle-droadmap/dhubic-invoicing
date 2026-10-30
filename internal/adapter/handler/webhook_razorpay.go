@@ -191,7 +191,7 @@ func (h *WebhookHandler) handleRazorpayPaymentCaptured(c *gin.Context, event Raz
 		return
 	}
 	if inv == nil {
-		h.logger.Warn("webhook ignored — invoice not found", "invoice_id", invoiceID)
+		h.logger.Warn("webhook ignored — invoice not found", "invoice_id", invoiceID, "hint", unscopedWebhookHint(ctx))
 		c.JSON(http.StatusOK, gin.H{"status": "ignored", "reason": "unknown invoice_id"})
 		return
 	}

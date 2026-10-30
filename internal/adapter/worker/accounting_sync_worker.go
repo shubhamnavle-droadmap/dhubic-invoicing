@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // tenantAccountingSyncer is the slice of AccountingService the worker uses.
@@ -45,7 +46,7 @@ func (w *AccountingSyncWorker) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			w.RunSync(ctx)
+			workspace.Each(ctx, w.RunSync)
 		}
 	}
 }

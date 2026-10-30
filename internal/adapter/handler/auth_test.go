@@ -443,3 +443,75 @@ func sessionCookieValue(w *httptest.ResponseRecorder) string {
 	}
 	return ""
 }
+
+// dedicated_database_id creates a database, so it is gated by a provisioning
+// token on the public register endpoint.
+func TestRegisterHandler_DedicatedDatabaseRequiresToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := `{"company_name":"Acme","name":"Alice","email":"alice@acme.com","password":"supersecret","dedicated_database_id":"acme"}`
+
+	cases := []struct {
+		name       string
+		serverTok  string
+		headerTok  string
+		wantStatus int
+	}{
+		{"no token configured refuses everyone", "", "", http.StatusForbidden},
+		{"no token configured, header guess", "", "anything", http.StatusForbidden},
+		{"token configured, header missing", "s3cret", "", http.StatusForbidden},
+		{"token configured, wrong header", "s3cret", "nope", http.StatusForbidden},
+		// Passing the gate reaches the service, which has the feature switched off
+		// in this fixture: 400 proves the request got past authorisation.
+		{"token configured, right header", "s3cret", "s3cret", http.StatusBadRequest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := NewAuthHandler(newTestAuthService(), false)
+			h.SetDedicatedDatabaseToken(tc.serverTok)
+			c, w := jsonCtx(http.MethodPost, "/auth/register", body)
+			if tc.headerTok != "" {
+				c.Request.Header.Set("X-Provisioning-Token", tc.headerTok)
+			}
+			h.Register(c)
+			if w.Code != tc.wantStatus {
+				t.Fatalf("status = %d body=%s, want %d", w.Code, w.Body.String(), tc.wantStatus)
+			}
+		})
+	}
+}
+
+// A signup without the field is unaffected by the gate: it never needs a token.
+func TestRegisterHandler_NoDatabaseFieldNeedsNoToken(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewAuthHandler(newTestAuthService(), false) // no token configured
+	c, w := jsonCtx(http.MethodPost, "/auth/register", `{"company_name":"Plain","name":"Pat","email":"pat@plain.com","password":"supersecret"}`)
+	h.Register(c)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("status = %d body=%s, want 201", w.Code, w.Body.String())
+	}
+}
+
+type limitReachedDBs struct{}
+
+func (limitReachedDBs) Provision(context.Context, string) (string, error) {
+	return "", service.ErrDedicatedDatabaseLimit
+}
+func (limitReachedDBs) Assign(context.Context, *domain.Tenant, string) error { return nil }
+func (limitReachedDBs) Drop(context.Context, string) error                    { return nil }
+
+// When the deployment is at its database limit the caller gets 429, not a 500.
+func TestRegisterHandler_DedicatedDatabaseLimitIs429(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	svc := newTestAuthService()
+	svc.ConfigureDedicatedDatabases(limitReachedDBs{})
+	h := NewAuthHandler(svc, false)
+	h.SetDedicatedDatabaseToken("s3cret")
+
+	c, w := jsonCtx(http.MethodPost, "/auth/register",
+		`{"company_name":"Acme","name":"Alice","email":"alice@acme.com","password":"supersecret","dedicated_database_id":"acme"}`)
+	c.Request.Header.Set("X-Provisioning-Token", "s3cret")
+	h.Register(c)
+	if w.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d body=%s, want 429", w.Code, w.Body.String())
+	}
+}

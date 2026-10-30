@@ -12,6 +12,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // DunningConfig holds dunning schedule configuration
@@ -141,7 +142,7 @@ func (s *DunningScheduler) processDunning() {
 
 	// Distributed Lock: Prevent multiple instances from running this job
 	lockKey := "scheduler:dunning"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 30*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(30*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for dunning scheduler", "error", err)
 		return
@@ -155,36 +156,38 @@ func (s *DunningScheduler) processDunning() {
 		}
 	}()
 
-	// Claim, don't read: the lock above is best-effort (a no-op without Redis,
-	// and its lease can lapse mid-sweep), and this was the one money-path
-	// sweep without an atomic claim (ADR-003). Each batch leases its rows for
-	// dunningClaimLease so a concurrent instance claims a disjoint set;
-	// processInvoice then records the real next retry date (or marks the
-	// invoice uncollectible), which supersedes the lease. Batches are bounded
-	// so a huge backlog is worked across ticks rather than in one unbounded
-	// pass.
-	total := 0
-	for batch := 0; batch < dunningMaxBatchesPerTick; batch++ {
-		invoices, err := s.invoiceRepo.ClaimOverdueForDunning(ctx, dunningClaimLease, dunningClaimBatch)
-		if err != nil {
-			slog.Error("failed to claim overdue invoices", "error", err)
-			return
+	workspace.Each(ctx, func(ctx context.Context) {
+		// Claim, don't read: the lock above is best-effort (a no-op without Redis,
+		// and its lease can lapse mid-sweep), and this was the one money-path
+		// sweep without an atomic claim (ADR-003). Each batch leases its rows for
+		// dunningClaimLease so a concurrent instance claims a disjoint set;
+		// processInvoice then records the real next retry date (or marks the
+		// invoice uncollectible), which supersedes the lease. Batches are bounded
+		// so a huge backlog is worked across ticks rather than in one unbounded
+		// pass.
+		total := 0
+		for batch := 0; batch < dunningMaxBatchesPerTick; batch++ {
+			invoices, err := s.invoiceRepo.ClaimOverdueForDunning(ctx, dunningClaimLease, dunningClaimBatch)
+			if err != nil {
+				slog.Error("failed to claim overdue invoices", "error", err)
+				return
+			}
+			if len(invoices) == 0 {
+				break
+			}
+			slog.Info("processing overdue invoices for dunning", "count", len(invoices), "batch", batch+1)
+			for _, invoice := range invoices {
+				s.processInvoice(ctx, invoice)
+			}
+			total += len(invoices)
+			if len(invoices) < dunningClaimBatch {
+				break
+			}
 		}
-		if len(invoices) == 0 {
-			break
+		if total == 0 {
+			slog.Info("no overdue invoices for dunning")
 		}
-		slog.Info("processing overdue invoices for dunning", "count", len(invoices), "batch", batch+1)
-		for _, invoice := range invoices {
-			s.processInvoice(ctx, invoice)
-		}
-		total += len(invoices)
-		if len(invoices) < dunningClaimBatch {
-			break
-		}
-	}
-	if total == 0 {
-		slog.Info("no overdue invoices for dunning")
-	}
+	})
 }
 
 const (
@@ -254,8 +257,10 @@ func (s *DunningScheduler) processInvoice(ctx context.Context, invoice domain.Ov
 		// Real SPA routes: hosted checkout pays the invoice; the portal login
 		// (magic link) fronts the card-update flow. The previous /portal/pay and
 		// /portal/payment-methods paths never existed.
-		PayNowURL:        fmt.Sprintf("%s/checkout/%s", s.portalBaseURL, invoice.ID),
-		UpdatePaymentURL: s.portalBaseURL + "/portal/login",
+		// workspace.Link adds ?w= on a dedicated workspace's pass of the sweep so the
+		// public pages can find its database; unchanged on the shared pass.
+		PayNowURL:        workspace.Link(ctx, fmt.Sprintf("%s/checkout/%s", s.portalBaseURL, invoice.ID)),
+		UpdatePaymentURL: workspace.Link(ctx, s.portalBaseURL+"/portal/login"),
 	}
 
 	if err := s.notificationSvc.SendDunningEmail(ctx, level, data); err != nil {

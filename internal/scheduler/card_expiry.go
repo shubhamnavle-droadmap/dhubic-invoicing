@@ -12,6 +12,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/adapter/email"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // CustomerRepoForCardExpiry is a narrow interface for the scheduler
@@ -85,7 +86,7 @@ func (s *CardExpiringScheduler) runCardExpiryNotifications() {
 
 	// Distributed Lock: Prevent multiple instances from running this job
 	lockKey := "scheduler:card-expiry"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for card expiry scheduler", "error", err)
 		return
@@ -99,45 +100,47 @@ func (s *CardExpiringScheduler) runCardExpiryNotifications() {
 		}
 	}()
 
-	// Calculate target: cards expiring in the next month
-	target := time.Now().AddDate(0, 1, 0)
-	targetMonth := int(target.Month())
-	targetYear := target.Year()
+	workspace.Each(ctx, func(ctx context.Context) {
+		// Calculate target: cards expiring in the next month
+		target := time.Now().AddDate(0, 1, 0)
+		targetMonth := int(target.Month())
+		targetYear := target.Year()
 
-	customers, err := s.customerRepo.GetCustomersWithExpiringCards(ctx, targetMonth, targetYear)
-	if err != nil {
-		slog.Error("failed to fetch customers with expiring cards", "error", err)
-		return
-	}
-
-	if len(customers) == 0 {
-		slog.Info("no cards expiring next month requiring notification")
-		return
-	}
-
-	slog.Info("found customers with expiring cards", "count", len(customers), "expiry_month", targetMonth, "expiry_year", targetYear)
-
-	for _, cust := range customers {
-		expiryDate := fmt.Sprintf("%s %d", time.Month(cust.CardExpMonth).String(), cust.CardExpYear)
-
-		data := email.CardExpiringEmailData{
-			CustomerName:     cust.CustomerName,
-			CustomerEmail:    cust.CustomerEmail,
-			CardBrand:        cust.CardBrand,
-			CardLast4:        cust.CardLast4,
-			ExpiryDate:       expiryDate,
-			UpdatePaymentURL: s.portalBaseURL + "/portal/login",
+		customers, err := s.customerRepo.GetCustomersWithExpiringCards(ctx, targetMonth, targetYear)
+		if err != nil {
+			slog.Error("failed to fetch customers with expiring cards", "error", err)
+			return
 		}
 
-		if err := s.notificationSvc.SendCardExpiringNotification(ctx, data); err != nil {
-			slog.Error("failed to send card expiry notification", "customer_id", cust.CustomerID, "error", err)
-			continue
+		if len(customers) == 0 {
+			slog.Info("no cards expiring next month requiring notification")
+			return
 		}
 
-		if err := s.customerRepo.MarkCardExpiryNotificationSent(ctx, cust.CustomerID, cust.TenantID, cust.CardExpMonth, cust.CardExpYear, cust.CardLast4); err != nil {
-			slog.Error("failed to mark card expiry notification as sent", "customer_id", cust.CustomerID, "error", err)
-		}
+		slog.Info("found customers with expiring cards", "count", len(customers), "expiry_month", targetMonth, "expiry_year", targetYear)
 
-		slog.Info("sent card expiry notification", "customer_id", cust.CustomerID, "customer_email", cust.CustomerEmail)
-	}
+		for _, cust := range customers {
+			expiryDate := fmt.Sprintf("%s %d", time.Month(cust.CardExpMonth).String(), cust.CardExpYear)
+
+			data := email.CardExpiringEmailData{
+				CustomerName:     cust.CustomerName,
+				CustomerEmail:    cust.CustomerEmail,
+				CardBrand:        cust.CardBrand,
+				CardLast4:        cust.CardLast4,
+				ExpiryDate:       expiryDate,
+				UpdatePaymentURL: workspace.Link(ctx, s.portalBaseURL+"/portal/login"),
+			}
+
+			if err := s.notificationSvc.SendCardExpiringNotification(ctx, data); err != nil {
+				slog.Error("failed to send card expiry notification", "customer_id", cust.CustomerID, "error", err)
+				continue
+			}
+
+			if err := s.customerRepo.MarkCardExpiryNotificationSent(ctx, cust.CustomerID, cust.TenantID, cust.CardExpMonth, cust.CardExpYear, cust.CardLast4); err != nil {
+				slog.Error("failed to mark card expiry notification as sent", "customer_id", cust.CustomerID, "error", err)
+			}
+
+			slog.Info("sent card expiry notification", "customer_id", cust.CustomerID, "customer_email", cust.CustomerEmail)
+		}
+	})
 }

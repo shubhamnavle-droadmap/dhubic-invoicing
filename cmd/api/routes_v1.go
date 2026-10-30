@@ -61,8 +61,9 @@ type v1Handlers struct {
 	offlinePaymentHandler   *handler.OfflinePaymentHandler
 	orgHandler              *handler.OrganizationHandler
 	pdfHandler              *handler.InvoicePDFHandler
+	manualInvoiceHandler    *handler.ManualInvoiceHandler
 	quoteHandler            *handler.QuoteHandler
-	rdb                     *redis.Client
+	rdb                   *redis.Client
 	reconciliationHandler   *handler.ReconciliationHandler
 	referralHandler         *handler.ReferralHandler
 	revenuecatImportHandler *handler.RevenueCatImportHandler
@@ -138,6 +139,9 @@ func registerV1Routes(r *gin.Engine, h *v1Handlers) {
 		v1.GET("/subscriptions/:id/history", h.subscriptionHandler.GetSubscriptionHistory)
 		// Financial position (MRR, recurring value, next invoice, outstanding).
 		v1.GET("/subscriptions/:id/financial-summary", h.subscriptionHandler.GetSubscriptionFinancialSummary)
+		// Manual invoice: explicit line items (negative lines allowed), chosen
+		// issuing entity and dates, idempotent on external_ref.
+		v1.POST("/invoices/manual", h.manualInvoiceHandler.CreateManualInvoice)
 		v1.GET("/invoices", h.subscriptionHandler.ListInvoices)
 		v1.GET("/invoices/:id", h.subscriptionHandler.GetInvoice)
 		v1.GET("/invoices/:id/journal-entries", h.subscriptionHandler.GetInvoiceJournalEntries)

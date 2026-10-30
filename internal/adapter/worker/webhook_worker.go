@@ -18,6 +18,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/httpsafe"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 type WebhookWorker struct {
@@ -76,7 +77,7 @@ func (w *WebhookWorker) Start(ctx context.Context) {
 			slog.Info("webhook worker stopping")
 			return
 		case <-ticker.C:
-			w.processDeliveries(ctx)
+			workspace.Each(ctx, w.processDeliveries)
 		}
 	}
 }

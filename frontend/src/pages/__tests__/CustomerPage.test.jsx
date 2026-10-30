@@ -9,6 +9,8 @@ import { endpoints } from "../../lib/api";
 vi.mock("../../lib/api", () => ({
   endpoints: {
     getCustomer: vi.fn(),
+    // the page reads the account to decide the portal link (dedicated-database workspaces)
+    getAccount: vi.fn().mockResolvedValue({ data: { data: null } }),
     getSubscriptions: vi.fn(),
     getInvoices: vi.fn(),
     getCreditNotes: vi.fn(),

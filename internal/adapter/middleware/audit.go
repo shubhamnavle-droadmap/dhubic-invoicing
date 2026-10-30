@@ -118,7 +118,7 @@ func Audit(repo port.AuditLogRepository) gin.HandlerFunc {
 		// Detached context: the write must survive the request context being
 		// canceled after the response, and must never block the response.
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(context.WithValue(context.Background(), domain.TenantIDKey, tid), 5*time.Second) // keep the workspace so the row lands in its database
 			defer cancel()
 			if err := repo.Insert(ctx, entry); err != nil {
 				slog.Error("audit log write failed", "action", entry.Action, "error", err)

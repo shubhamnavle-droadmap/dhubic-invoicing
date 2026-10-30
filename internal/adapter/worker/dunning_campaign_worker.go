@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // DunningCampaignWorker polls for due campaign steps and processes them
@@ -33,9 +34,11 @@ func (w *DunningCampaignWorker) Start(ctx context.Context) {
 			slog.Info("dunning campaign worker stopping")
 			return
 		case <-ticker.C:
-			if err := w.campaignService.ProcessDueSteps(ctx); err != nil {
-				slog.Error("dunning campaign worker: failed to process due steps", "error", err)
-			}
+			workspace.Each(ctx, func(ctx context.Context) {
+				if err := w.campaignService.ProcessDueSteps(ctx); err != nil {
+					slog.Error("dunning campaign worker: failed to process due steps", "error", err)
+				}
+			})
 		}
 	}
 }

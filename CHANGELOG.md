@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Manual invoices (`POST /v1/invoices/manual`).** Create a one-off invoice
+  from explicit line items for a chosen issuing legal entity and dates —
+  built for loading already-priced receivables from a billing-run export.
+  Lines are signed minor units, so a waiver or discount stays visible as its
+  own negative line; the net total must not be negative (use a credit note).
+  The invoice takes the next gapless number in the issuing entity's series and
+  posts its AR → Revenue ledger leg like every other invoice. A fully-waived
+  (net 0) invoice is recorded as paid. Imported invoices are owned by manual
+  collection (`dunning_managed_by = 'manual'`), so the dunning scheduler never
+  emails or retries them. An optional `external_ref` makes the call
+  idempotent per tenant: a replay returns the original invoice (200,
+  `replayed: true`). Owner/admin only. Migration `000176` adds
+  `invoices.external_ref` and its partial unique index.
+- **`scripts/ar_import.py`** — a manual, dry-run-first loader that groups an
+  AR export by (billing entity, issuing company), skips `NOT BILLED` rows,
+  allocates rounding so each invoice total equals the true total, and writes
+  reconciliation reports (skipped rows, $0 rows, rounding adjustments,
+  source-row → invoice-number mapping).
+
 ## [0.14.0] - 2026-09-04 — The hardening release
 
 0.13.0 made every object deep; 0.14.0 made the whole thing trustworthy under

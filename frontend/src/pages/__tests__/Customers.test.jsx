@@ -10,6 +10,8 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 vi.mock('../../lib/api', () => ({
     endpoints: {
         getCustomers: vi.fn(),
+        // the page reads the account to decide the portal link (dedicated-database workspaces)
+        getAccount: vi.fn().mockResolvedValue({ data: { data: null } }),
     }
 }));
 

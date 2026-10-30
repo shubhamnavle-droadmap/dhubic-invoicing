@@ -26,9 +26,11 @@ type portalHandlers struct {
 // portal session + CSRF middleware.
 func registerPortalRoutes(r *gin.Engine, h *portalHandlers) {
 	// Customer Portal Auth (P25)
-	r.POST("/portal/auth/request", h.publicLimit, h.portalAPIHandler.RequestMagicLink)
-	r.GET("/portal/auth/verify", h.publicLimit, h.portalAPIHandler.VerifyMagicLink)  // deprecated: query-string token, kept one release for links in flight
-	r.POST("/portal/auth/verify", h.publicLimit, h.portalAPIHandler.VerifyMagicLink) // preferred: token in POST body (not logged/refererred)
+	// ?w=<workspace> (from the login / emailed link) selects a dedicated-database
+	// workspace; without it these behave exactly as before.
+	r.POST("/portal/auth/request", h.publicLimit, middleware.WorkspaceFromQuery(), h.portalAPIHandler.RequestMagicLink)
+	r.GET("/portal/auth/verify", h.publicLimit, middleware.WorkspaceFromQuery(), h.portalAPIHandler.VerifyMagicLink)  // deprecated: query-string token, kept one release for links in flight
+	r.POST("/portal/auth/verify", h.publicLimit, middleware.WorkspaceFromQuery(), h.portalAPIHandler.VerifyMagicLink) // preferred: token in POST body (not logged/refererred)
 
 	// Protected Customer Portal Routes
 	portal := r.Group("/portal/api")

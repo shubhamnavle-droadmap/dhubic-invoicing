@@ -13,6 +13,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // defaultTrialReminderWindow is how far before trial_end the "trial ending"
@@ -112,7 +113,7 @@ func (s *TrialScheduler) processTrials() {
 	ctx := context.Background()
 
 	lockKey := "scheduler:trials"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 15*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(15*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for trial scheduler", "error", err)
 		return
@@ -126,8 +127,10 @@ func (s *TrialScheduler) processTrials() {
 		}
 	}()
 
-	s.sendReminders(ctx)
-	s.convertExpiredTrials(ctx)
+	workspace.Each(ctx, func(ctx context.Context) {
+		s.sendReminders(ctx)
+		s.convertExpiredTrials(ctx)
+	})
 }
 
 // sendReminders emails customers whose trial ends within the reminder window,
@@ -148,7 +151,7 @@ func (s *TrialScheduler) sendReminders(ctx context.Context) {
 			TrialEndDate:  n.TrialEnd.Format("January 2, 2006"),
 			// The SPA's portal entry is /portal/login — bare /portal matches
 			// nothing and the router catch-all bounces to the merchant app.
-			PortalURL: s.portalBaseURL + "/portal/login",
+			PortalURL: workspace.Link(ctx, s.portalBaseURL+"/portal/login"),
 		}
 
 		if err := s.notifier.SendTrialEndingReminder(ctx, data); err != nil {

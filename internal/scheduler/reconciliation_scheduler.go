@@ -10,6 +10,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/core/domain"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // TenantRepoForReconciliation is the narrow tenant listing the scheduler needs.
@@ -85,7 +86,7 @@ func (s *ReconciliationScheduler) runReconciliation() {
 
 	// Distributed Lock: Prevent multiple instances from running this job
 	lockKey := "scheduler:ledger-reconciliation"
-	release, acquired, err := s.locker.Obtain(ctx, lockKey, 30*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, lockKey, workspace.LockTTL(30*time.Minute))
 	if err != nil {
 		slog.Error("Failed to obtain lock for reconciliation scheduler", "error", err)
 		return
@@ -106,7 +107,7 @@ func (s *ReconciliationScheduler) runReconciliation() {
 	}
 
 	for _, tenant := range tenants {
-		report, err := s.runner.Run(ctx, tenant.ID)
+		report, err := s.runner.Run(workspace.With(ctx, tenant.ID), tenant.ID)
 		if err != nil {
 			slog.Error("Ledger reconciliation failed for tenant",
 				"tenant_id", tenant.ID, "error", err)

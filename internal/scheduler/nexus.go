@@ -9,6 +9,7 @@ import (
 	"github.com/recurso-dev/recurso/internal/adapter/db"
 	"github.com/recurso-dev/recurso/internal/core/port"
 	"github.com/recurso-dev/recurso/internal/service"
+	"github.com/recurso-dev/recurso/internal/workspace"
 )
 
 // NexusScheduler evaluates US economic-nexus thresholds daily for every
@@ -74,7 +75,7 @@ func (s *NexusScheduler) Stop() {
 func (s *NexusScheduler) run() {
 	ctx := context.Background()
 
-	release, acquired, err := s.locker.Obtain(ctx, "scheduler:nexus", 10*time.Minute)
+	release, acquired, err := s.locker.Obtain(ctx, "scheduler:nexus", workspace.LockTTL(10*time.Minute))
 	if err != nil {
 		slog.Error("failed to obtain lock for nexus scheduler", "error", err)
 		return
@@ -100,13 +101,13 @@ func (s *NexusScheduler) run() {
 		// (which establishes new economic nexus) and notifies on newly reached
 		// approaching/crossed thresholds. Otherwise, just establish.
 		if s.alerts != nil {
-			if err := s.alerts.EvaluateAndAlert(ctx, t.ID, year); err != nil {
+			if err := s.alerts.EvaluateAndAlert(workspace.With(ctx, t.ID), t.ID, year); err != nil {
 				slog.Error("nexus scheduler: evaluate+alert failed for tenant", "tenant_id", t.ID, "error", err)
 			}
 			continue
 		}
 
-		established, err := s.status.EvaluateEconomicNexus(ctx, t.ID, year)
+		established, err := s.status.EvaluateEconomicNexus(workspace.With(ctx, t.ID), t.ID, year)
 		if err != nil {
 			slog.Error("nexus scheduler: evaluation failed for tenant", "tenant_id", t.ID, "error", err)
 			continue
